@@ -1,0 +1,23 @@
+[Unit]
+Description=suffuse clipboard client
+Documentation=https://go.klb.dev/suffuse
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/suffuse client
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=suffuse-client
+# Environment=SUFFUSE_SERVER=192.168.1.10:9876
+# Environment=SUFFUSE_TOKEN=mysecret
+# Environment=SUFFUSE_SOURCE=myhost
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

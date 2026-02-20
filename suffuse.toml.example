@@ -1,0 +1,72 @@
+# suffuse example configuration file
+#
+# Copy to one of the following locations (first found wins):
+#   /etc/suffuse/suffuse.toml        (system-wide)
+#   ~/.config/suffuse/suffuse.toml   (per-user)
+#   path supplied via --config flag
+#
+# Precedence (lowest → highest):
+#   defaults → this file → SUFFUSE_* env vars → CLI flags
+
+# ── Server ─────────────────────────────────────────────────────────────────
+
+# TCP address to listen on.
+# Default: 0.0.0.0:8752
+# Env:     SUFFUSE_ADDR
+addr = "0.0.0.0:8752"
+
+# Shared secret. If set, all clients must supply the same token.
+# The token is also used to derive the NaCl secretbox encryption key,
+# so setting it enables both auth and encryption in one step.
+# Leave empty to disable auth and encryption (fine for trusted LANs).
+# Env: SUFFUSE_TOKEN
+token = ""
+
+# Human-readable name shown in peer lists for this host's local clipboard.
+# Defaults to the system hostname if unset.
+# Env: SUFFUSE_SOURCE
+# source = "macbook"
+
+# Set to true to run as a relay/hub only — disables local clipboard integration.
+# Default: false
+# Env:     SUFFUSE_NO_LOCAL
+# no-local = false
+
+# ── Client ─────────────────────────────────────────────────────────────────
+
+# Address of the suffuse server to connect to.
+# Default: localhost:8752
+# Env:     SUFFUSE_SERVER
+server = "localhost:8752"
+
+# MIME types this client will accept from the server.
+# Empty means accept all types (the default for host machines).
+# Restrict to text/plain on clients that cannot handle images (containers, Neovim plugin).
+#
+# Valid values (these are the only two types the clipboard backend supports):
+#   "text/plain"  — plain text
+#   "image/png"   — PNG image
+#
+# TOML format (array literal):
+#   accept = ["text/plain", "image/png"]
+#
+# Env var format (comma-separated, no brackets):
+#   SUFFUSE_ACCEPT=text/plain,image/png
+#
+# accept = ["text/plain"]
+
+# ── Logging ────────────────────────────────────────────────────────────────
+
+# Log format: auto | text | json
+#   auto  — tinter (coloured) when stderr is a TTY, JSON otherwise
+#   text  — tinter always
+#   json  — structured JSON always (recommended for systemd/launchd)
+# Default: auto
+# Env:     SUFFUSE_LOG_FORMAT
+# log-format = "auto"
+
+# Log level: debug | info | warn | error
+# Defaults to "debug" when running interactively (TTY or --no-background),
+# "info" otherwise.
+# Env: SUFFUSE_LOG_LEVEL
+# log-level = "info"

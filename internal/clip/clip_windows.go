@@ -34,9 +34,7 @@ package clip
 //     MSG msg;
 //     *changed = 0;
 //     while (PeekMessage(&msg, hwnd, 0, 0, PM_REMOVE)) {
-//         if (msg.message == WM_USER + 1) {
-//             *changed = 1;
-//         }
+//         if (msg.message == WM_USER + 1) { *changed = 1; }
 //         TranslateMessage(&msg);
 //         DispatchMessage(&msg);
 //     }
@@ -44,19 +42,14 @@ package clip
 import "C"
 
 import (
+	"fmt"
 	"log/slog"
 	"time"
 
 	"golang.design/x/clipboard"
 
-	"go.klb.dev/suffuse/internal/message"
+	pb "go.klb.dev/suffuse/gen/suffuse/v1"
 )
-
-func init() {
-	if err := clipboard.Init(); err != nil {
-		slog.Warn("clipboard init failed", "err", err)
-	}
-}
 
 type windowsBackend struct {
 	hwnd    C.HWND
@@ -65,7 +58,13 @@ type windowsBackend struct {
 }
 
 // New returns the Windows clipboard backend using AddClipboardFormatListener.
+// clipboard.Init is called here rather than in init() so that CLI sub-commands
+// (status, copy, paste) that never construct a Backend don't log spurious
+// warnings on headless systems.
 func New() Backend {
+	if err := clipboard.Init(); err != nil {
+		slog.Warn("clipboard init failed", "err", err)
+	}
 	hwnd := C.suffuse_create_listener_window()
 	b := &windowsBackend{
 		hwnd:    hwnd,
@@ -98,28 +97,26 @@ func (b *windowsBackend) pump() {
 	}
 }
 
-func (b *windowsBackend) Read() ([]message.Item, error) {
-	var items []message.Item
+func (b *windowsBackend) Read() ([]*pb.ClipboardItem, error) {
+	var items []*pb.ClipboardItem
 	if text := clipboard.Read(clipboard.FmtText); text != nil {
-		items = append(items, message.NewTextItem(string(text)))
+		items = append(items, &pb.ClipboardItem{Mime: "text/plain", Data: text})
 	}
 	if img := clipboard.Read(clipboard.FmtImage); img != nil {
-		items = append(items, message.NewBinaryItem("image/png", img))
+		items = append(items, &pb.ClipboardItem{Mime: "image/png", Data: img})
 	}
 	return items, nil
 }
 
-func (b *windowsBackend) Write(items []message.Item) error {
+func (b *windowsBackend) Write(items []*pb.ClipboardItem) error {
 	for _, it := range items {
-		data, err := it.Decode()
-		if err != nil {
-			continue
-		}
-		switch it.MIME {
+		switch it.Mime {
 		case "text/plain":
-			clipboard.Write(clipboard.FmtText, data)
+			clipboard.Write(clipboard.FmtText, it.Data)
 		case "image/png":
-			clipboard.Write(clipboard.FmtImage, data)
+			clipboard.Write(clipboard.FmtImage, it.Data)
+		default:
+			return fmt.Errorf("unsupported MIME type: %s", it.Mime)
 		}
 	}
 	return nil

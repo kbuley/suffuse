@@ -1,28 +1,123 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
-	"net"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
+	pb "go.klb.dev/suffuse/gen/suffuse/v1"
 	"go.klb.dev/suffuse/internal/clip"
-	"go.klb.dev/suffuse/internal/crypto"
+	"go.klb.dev/suffuse/internal/hub"
 	"go.klb.dev/suffuse/internal/ipc"
-	"go.klb.dev/suffuse/internal/message"
-	"go.klb.dev/suffuse/internal/wire"
 )
 
 const (
-	watchdogTimeout = 45 * time.Second
-	watchdogCheck   = 5 * time.Second
+	reconnectDelay = time.Second
+	maxReconnect   = 30 * time.Second
 )
+
+// ── sessionState ──────────────────────────────────────────────────────────────
+
+// sessionState holds metadata about the live upstream connection so that the
+// IPC status handler can enrich responses without opening a second TCP hop.
+type sessionState struct {
+	mu          sync.RWMutex
+	serverAddr  string
+	source      string
+	connectedAt time.Time
+	connected   bool
+	lastSeen    atomic.Int64 // UnixNano of last WatchResponse received
+}
+
+func newSessionState(serverAddr, source string) *sessionState {
+	return &sessionState{serverAddr: serverAddr, source: source}
+}
+
+func (s *sessionState) markConnected() {
+	s.mu.Lock()
+	s.connected = true
+	s.connectedAt = time.Now()
+	s.mu.Unlock()
+}
+
+func (s *sessionState) markDisconnected() {
+	s.mu.Lock()
+	s.connected = false
+	s.mu.Unlock()
+}
+
+func (s *sessionState) touch() {
+	s.lastSeen.Store(time.Now().UnixNano())
+}
+
+func (s *sessionState) snapshot() (serverAddr string, connectedAt time.Time, lastSeen time.Time, connected bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ls := s.lastSeen.Load()
+	var lsTime time.Time
+	if ls > 0 {
+		lsTime = time.Unix(0, ls)
+	}
+	return s.serverAddr, s.connectedAt, lsTime, s.connected
+}
+
+// ── ipcService ────────────────────────────────────────────────────────────────
+
+// ipcService implements ClipboardServiceServer over the local Unix socket.
+// CLI tools (copy/paste/status) connect here; requests are proxied upstream
+// and Status responses are enriched with local connection metadata.
+type ipcService struct {
+	pb.UnimplementedClipboardServiceServer
+	upstream pb.ClipboardServiceClient
+	state    *sessionState
+}
+
+func (s *ipcService) Copy(ctx context.Context, req *pb.CopyRequest) (*pb.CopyResponse, error) {
+	if s.upstream == nil {
+		return nil, status.Error(codes.Unavailable, "not connected to server")
+	}
+	return s.upstream.Copy(ctx, req)
+}
+
+func (s *ipcService) Paste(ctx context.Context, req *pb.PasteRequest) (*pb.PasteResponse, error) {
+	if s.upstream == nil {
+		return nil, status.Error(codes.Unavailable, "not connected to server")
+	}
+	return s.upstream.Paste(ctx, req)
+}
+
+func (s *ipcService) Status(ctx context.Context, req *pb.StatusRequest) (*pb.StatusResponse, error) {
+	if s.upstream == nil {
+		return nil, status.Error(codes.Unavailable, "not connected to server")
+	}
+	resp, err := s.upstream.Status(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	serverAddr, connectedAt, lastSeen, _ := s.state.snapshot()
+	resp.ClientInfo = &pb.ClientConnectionInfo{
+		ServerAddr:  serverAddr,
+		Source:      s.state.source,
+		ConnectedAt: timestamppb.New(connectedAt),
+		LastSeen:    timestamppb.New(lastSeen),
+	}
+	return resp, nil
+}
+
+// ── cobra command ─────────────────────────────────────────────────────────────
 
 func newClientCmd() *cobra.Command {
 	v := viper.New()
@@ -34,7 +129,7 @@ func newClientCmd() *cobra.Command {
 in sync with all other connected peers. Reconnects automatically on disconnect.
 
 When running as a service, copy/paste/status CLI tools connect to the client
-daemon via the local IPC socket rather than the server directly.
+daemon via the local IPC socket rather than opening their own server connections.
 
 Config file search order:
   /etc/suffuse/suffuse.toml
@@ -66,313 +161,140 @@ func runClient(v *viper.Viper) error {
 	source := v.GetString("source")
 	accept := v.GetStringSlice("accept")
 
-	var key *[32]byte
-	if token != "" {
-		var err error
-		key, err = crypto.DeriveKey(token)
-		if err != nil {
-			return fmt.Errorf("key derivation: %w", err)
-		}
-	}
-
 	slog.Info("suffuse client starting",
 		"version", Version,
 		"server", serverAddr,
 		"source", source,
-		"encrypted", key != nil,
+		"auth", token != "",
 	)
 
 	backend := clip.New()
 	defer backend.Close()
 	slog.Info("clipboard backend", "name", backend.Name())
 
-	// IPC socket so copy/paste/status can talk to us
-	ipcLn, err := ipc.Listen()
+	state := newSessionState(serverAddr, source)
+
+	// Dial upstream (non-blocking — connection established lazily by gRPC).
+	upstreamConn, err := grpc.NewClient(serverAddr, dialOpts(token, source)...)
 	if err != nil {
+		return fmt.Errorf("dial %s: %w", serverAddr, err)
+	}
+	defer upstreamConn.Close()
+	upstreamClient := pb.NewClipboardServiceClient(upstreamConn)
+
+	// Start local IPC server so CLI tools connect here instead of TCP.
+	ipcSvc := &ipcService{upstream: upstreamClient, state: state}
+	if ln, err := ipc.Listen(); err != nil {
 		slog.Warn("IPC socket unavailable", "err", err)
 	} else {
 		slog.Info("IPC socket listening", "path", ipc.SocketPath())
-		go serveClientIPC(ipcLn, serverAddr, source, accept, key)
+		grpcSrv := grpc.NewServer()
+		pb.RegisterClipboardServiceServer(grpcSrv, ipcSvc)
+		go grpcSrv.Serve(ln) //nolint:errcheck
 	}
 
-	connectLoop(serverAddr, token, source, accept, key, backend)
+	clientLoop(upstreamClient, backend, source, accept, state)
 	return nil
 }
 
-func connectLoop(
-	serverAddr, token, source string,
-	accept []string,
-	key *[32]byte,
+// ── watch / copy loop ─────────────────────────────────────────────────────────
+
+func clientLoop(
+	client pb.ClipboardServiceClient,
 	backend clip.Backend,
+	source string,
+	accept []string,
+	state *sessionState,
 ) {
-	delay := time.Second
+	var lastItems []*pb.ClipboardItem
+	delay := reconnectDelay
+
 	for {
-		slog.Info("connecting", "addr", serverAddr)
-		conn, err := net.DialTimeout("tcp", serverAddr, 10*time.Second)
-		if err != nil {
-			slog.Warn("connection failed", "err", err, "retry_in", delay)
-			time.Sleep(delay)
-			if delay < 30*time.Second {
-				delay *= 2
+		ctx, cancel := context.WithCancel(context.Background())
+
+		// Local clipboard → server.
+		go func() {
+			defer cancel()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-backend.Watch():
+					items, err := backend.Read()
+					if err != nil || len(items) == 0 {
+						continue
+					}
+					if reflect.DeepEqual(items, lastItems) {
+						continue
+					}
+					lastItems = items
+					hub.LogItems("local clipboard changed, sending", source, hub.DefaultClipboard, items)
+					_, err = client.Copy(ctx, &pb.CopyRequest{
+						Source:    source,
+						Clipboard: hub.DefaultClipboard,
+						Items:     items,
+					})
+					if err != nil && !errors.Is(ctx.Err(), context.Canceled) {
+						slog.Warn("copy failed", "err", err)
+					}
+				}
 			}
+		}()
+
+		err := watchStream(ctx, client, backend, &lastItems, accept, state)
+		cancel()
+
+		if err != nil {
+			if status.Code(err) == codes.Canceled || errors.Is(err, context.Canceled) {
+				return
+			}
+			slog.Warn("watch stream ended, reconnecting", "err", err, "retry_in", delay)
+		}
+		state.markDisconnected()
+		time.Sleep(delay)
+		if delay < maxReconnect {
+			delay *= 2
+		}
+	}
+}
+
+func watchStream(
+	ctx context.Context,
+	client pb.ClipboardServiceClient,
+	backend clip.Backend,
+	lastItems *[]*pb.ClipboardItem,
+	accept []string,
+	state *sessionState,
+) error {
+	stream, err := client.Watch(ctx, &pb.WatchRequest{
+		Clipboard: hub.DefaultClipboard,
+		Accepts:   accept,
+	})
+	if err != nil {
+		return err
+	}
+	state.markConnected()
+	slog.Info("connected to server")
+
+	for {
+		ev, err := stream.Recv()
+		if err != nil {
+			if err == io.EOF {
+				return fmt.Errorf("server closed stream")
+			}
+			return err
+		}
+		state.touch()
+		if len(ev.Items) == 0 {
 			continue
 		}
-		delay = time.Second
-		slog.Info("connected")
-		runSession(conn, token, source, accept, key, backend)
-		slog.Warn("disconnected, reconnecting")
-		time.Sleep(time.Second)
-	}
-}
-
-type clientSession struct {
-	wc        *wire.Conn
-	source    string
-	accept    []string
-	backend   clip.Backend
-	sendCh    chan *message.Message
-	lastItems []message.Item
-	lastRecv  atomic.Int64
-}
-
-func runSession(
-	conn net.Conn,
-	token, source string,
-	accept []string,
-	key *[32]byte,
-	backend clip.Backend,
-) {
-	s := &clientSession{
-		wc:      wire.New(conn, key),
-		source:  source,
-		accept:  accept,
-		backend: backend,
-		sendCh:  make(chan *message.Message, 8),
-	}
-	s.lastRecv.Store(time.Now().UnixNano())
-
-	if token != "" {
-		if err := s.wc.WriteMsg(&message.Message{
-			Type:      message.TypeAuth,
-			Source:    source,
-			Clipboard: message.DefaultClipboard,
-			Payload:   encodeToken(token),
-			Accept:    accept,
-		}); err != nil {
-			slog.Error("auth send failed", "err", err)
-			return
+		if reflect.DeepEqual(ev.Items, *lastItems) {
+			continue
+		}
+		*lastItems = ev.Items
+		hub.LogItems("clipboard received", ev.Source, ev.Clipboard, ev.Items)
+		if err := backend.Write(ev.Items); err != nil {
+			slog.Error("clipboard write failed", "err", err)
 		}
 	}
-
-	// Writer
-	go func() {
-		for msg := range s.sendCh {
-			if err := s.wc.WriteMsg(msg); err != nil {
-				slog.Error("write failed", "err", err)
-				s.wc.Close()
-				return
-			}
-		}
-	}()
-
-	// Reader
-	readerDone := make(chan struct{})
-	go func() {
-		defer close(readerDone)
-		for {
-			msg, err := s.wc.ReadMsg()
-			if err != nil {
-				if !errors.Is(err, net.ErrClosed) {
-					slog.Info("server closed connection", "err", err)
-				}
-				s.wc.Close()
-				return
-			}
-			s.lastRecv.Store(time.Now().UnixNano())
-
-			switch msg.Type {
-			case message.TypeClipboard:
-				if len(msg.Items) == 0 {
-					continue
-				}
-				if reflect.DeepEqual(msg.Items, s.lastItems) {
-					continue
-				}
-				s.lastItems = msg.Items
-				slog.Debug("clipboard received", "source", msg.Source, "items", len(msg.Items))
-				if err := backend.Write(msg.Items); err != nil {
-					slog.Error("clipboard write failed", "err", err)
-				}
-
-			case message.TypePing:
-				s.send(&message.Message{Type: message.TypePong, Source: source})
-
-			case message.TypePong:
-				// handled by lastRecv update
-
-			case message.TypeError:
-				slog.Error("server error", "error", msg.Error)
-				s.wc.Close()
-				return
-			}
-		}
-	}()
-
-	// Watchdog
-	go func() {
-		ticker := time.NewTicker(watchdogCheck)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-readerDone:
-				return
-			case <-ticker.C:
-				age := time.Since(time.Unix(0, s.lastRecv.Load()))
-				if age > watchdogTimeout {
-					slog.Warn("watchdog: server silent too long, closing", "silent_for", age.Round(time.Second))
-					s.wc.Close()
-					return
-				}
-			}
-		}
-	}()
-
-	// Clipboard watcher
-	for {
-		select {
-		case <-readerDone:
-			return
-		case <-backend.Watch():
-			items, err := backend.Read()
-			if err != nil || len(items) == 0 {
-				continue
-			}
-			if reflect.DeepEqual(items, s.lastItems) {
-				continue
-			}
-			s.lastItems = items
-			slog.Debug("local clipboard changed, sending", "items", len(items))
-			s.send(&message.Message{
-				Type:      message.TypeClipboard,
-				Source:    source,
-				Clipboard: message.DefaultClipboard,
-				Items:     items,
-			})
-		}
-	}
-}
-
-func (s *clientSession) send(msg *message.Message) {
-	select {
-	case s.sendCh <- msg:
-	default:
-		slog.Warn("client send channel full, dropping")
-	}
-}
-
-func serveClientIPC(ln net.Listener, serverAddr, source string, accept []string, key *[32]byte) {
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		go handleClientIPC(conn, serverAddr, source, accept, key)
-	}
-}
-
-func handleClientIPC(conn net.Conn, serverAddr, source string, accept []string, key *[32]byte) {
-	defer conn.Close()
-	wc := wire.New(conn, nil)
-
-	msg, err := wc.ReadMsg()
-	if err != nil {
-		return
-	}
-
-	switch msg.Type {
-	case message.TypeStatus:
-		resp := proxyStatus(serverAddr, source, accept, key)
-		_ = wc.WriteMsg(resp)
-
-	case message.TypeClipboard:
-		forwardToServer(serverAddr, source, key, msg)
-
-	case message.TypePing:
-		items := retrieveFromServer(serverAddr, source, accept, key)
-		_ = wc.WriteMsg(&message.Message{
-			Type:      message.TypeClipboard,
-			Clipboard: message.DefaultClipboard,
-			Items:     items,
-		})
-	}
-}
-
-func proxyStatus(serverAddr, source string, accept []string, key *[32]byte) *message.Message {
-	conn, err := net.DialTimeout("tcp", serverAddr, 5*time.Second)
-	if err != nil {
-		return &message.Message{
-			Type:  message.TypeStatusResponse,
-			Role:  message.RoleClient,
-			Error: fmt.Sprintf("could not reach server: %v", err),
-			Upstream: &message.UpstreamInfo{
-				Addr: serverAddr,
-			},
-		}
-	}
-	defer conn.Close()
-
-	wc := wire.New(conn, key)
-	_ = wc.WriteMsg(&message.Message{
-		Type:   message.TypeStatus,
-		Source: source,
-		Accept: accept,
-	})
-
-	resp, err := wc.ReadMsg()
-	if err != nil {
-		return &message.Message{
-			Type:  message.TypeStatusResponse,
-			Role:  message.RoleClient,
-			Error: fmt.Sprintf("status read failed: %v", err),
-		}
-	}
-
-	resp.Role = message.RoleClient
-	resp.Upstream = &message.UpstreamInfo{
-		Addr:        serverAddr,
-		ConnectedAt: time.Now(),
-		LastSeen:    time.Now(),
-	}
-	return resp
-}
-
-func forwardToServer(serverAddr, source string, key *[32]byte, msg *message.Message) {
-	conn, err := net.DialTimeout("tcp", serverAddr, 5*time.Second)
-	if err != nil {
-		slog.Warn("copy: could not reach server", "err", err)
-		return
-	}
-	defer conn.Close()
-	wc := wire.New(conn, key)
-	msg.Source = source
-	_ = wc.WriteMsg(msg)
-}
-
-func retrieveFromServer(serverAddr, source string, accept []string, key *[32]byte) []message.Item {
-	conn, err := net.DialTimeout("tcp", serverAddr, 5*time.Second)
-	if err != nil {
-		return nil
-	}
-	defer conn.Close()
-	wc := wire.New(conn, key)
-	_ = wc.WriteMsg(&message.Message{
-		Type:   message.TypePing,
-		Source: source,
-		Accept: accept,
-	})
-	msg, err := wc.ReadMsg()
-	if err != nil || msg.Type != message.TypeClipboard {
-		return nil
-	}
-	return msg.Items
 }

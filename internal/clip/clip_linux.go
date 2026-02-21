@@ -4,22 +4,16 @@ package clip
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"time"
 
 	"golang.design/x/clipboard"
 
-	"go.klb.dev/suffuse/internal/message"
+	pb "go.klb.dev/suffuse/gen/suffuse/v1"
 )
 
 const linuxPollInterval = 250 * time.Millisecond
-
-func init() {
-	if err := clipboard.Init(); err != nil {
-		// Non-fatal: headless containers have no display server.
-		slog.Warn("clipboard init failed (headless?)", "err", err)
-	}
-}
 
 type linuxBackend struct {
 	watchCh  chan struct{}
@@ -28,9 +22,14 @@ type linuxBackend struct {
 	lastImg  []byte
 }
 
-// New returns the Linux clipboard backend. Change detection is via polling
-// since X11 provides no notification mechanism and Wayland support is deferred.
+// New returns the Linux clipboard backend. Change detection is via polling.
+// clipboard.Init is called here rather than in init() so that CLI sub-commands
+// (status, copy, paste) that never construct a Backend don't trigger the X11
+// initialisation warning on headless systems.
 func New() Backend {
+	if err := clipboard.Init(); err != nil {
+		slog.Warn("clipboard init failed (headless?)", "err", err)
+	}
 	b := &linuxBackend{
 		watchCh: make(chan struct{}, 1),
 		done:    make(chan struct{}),
@@ -63,28 +62,26 @@ func (b *linuxBackend) poll() {
 	}
 }
 
-func (b *linuxBackend) Read() ([]message.Item, error) {
-	var items []message.Item
+func (b *linuxBackend) Read() ([]*pb.ClipboardItem, error) {
+	var items []*pb.ClipboardItem
 	if text := clipboard.Read(clipboard.FmtText); text != nil {
-		items = append(items, message.NewTextItem(string(text)))
+		items = append(items, &pb.ClipboardItem{Mime: "text/plain", Data: text})
 	}
 	if img := clipboard.Read(clipboard.FmtImage); img != nil {
-		items = append(items, message.NewBinaryItem("image/png", img))
+		items = append(items, &pb.ClipboardItem{Mime: "image/png", Data: img})
 	}
 	return items, nil
 }
 
-func (b *linuxBackend) Write(items []message.Item) error {
+func (b *linuxBackend) Write(items []*pb.ClipboardItem) error {
 	for _, it := range items {
-		data, err := it.Decode()
-		if err != nil {
-			continue
-		}
-		switch it.MIME {
+		switch it.Mime {
 		case "text/plain":
-			clipboard.Write(clipboard.FmtText, data)
+			clipboard.Write(clipboard.FmtText, it.Data)
 		case "image/png":
-			clipboard.Write(clipboard.FmtImage, data)
+			clipboard.Write(clipboard.FmtImage, it.Data)
+		default:
+			return fmt.Errorf("unsupported MIME type: %s", it.Mime)
 		}
 	}
 	return nil

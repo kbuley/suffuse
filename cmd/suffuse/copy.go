@@ -1,48 +1,45 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"os"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"google.golang.org/grpc"
 
-	"go.klb.dev/suffuse/internal/crypto"
+	pb "go.klb.dev/suffuse/gen/suffuse/v1"
+	"go.klb.dev/suffuse/internal/hub"
 	"go.klb.dev/suffuse/internal/ipc"
-	"go.klb.dev/suffuse/internal/message"
-	"go.klb.dev/suffuse/internal/wire"
 )
 
 func newCopyCmd() *cobra.Command {
 	v := viper.New()
 
 	cmd := &cobra.Command{
-		Use:   "copy",
-		Short: "Copy stdin to the suffuse clipboard (like pbcopy)",
-		Long: `Reads stdin and sends it to the suffuse clipboard.
-
-If a local suffuse daemon is running, it is used directly via the IPC socket.
-Otherwise connects to the server specified in config or via --server.`,
+		Use:     "copy",
+		Short:   "Copy stdin to the suffuse clipboard (like pbcopy)",
+		Long:    `Reads stdin and publishes it to the suffuse clipboard via gRPC.`,
 		Args:    cobra.NoArgs,
 		PreRunE: func(cmd *cobra.Command, _ []string) error { return bindViper(cmd, v) },
-		RunE:    func(_ *cobra.Command, _ []string) error { return runCopy(v) },
+		RunE:    func(cmd *cobra.Command, _ []string) error { return runCopy(cmd, v) },
 	}
 
 	f := cmd.Flags()
-	f.String("server", "localhost:8752", "suffuse server address (used if no local daemon)")
+	f.String("server", "localhost:8752", "suffuse server address (used when no daemon is running)")
 	f.String("token", "", "shared secret")
 	f.String("mime", "text/plain", "MIME type of the data being copied")
 	f.String("source", defaultSource(), "source identifier")
+	f.String("clipboard", hub.DefaultClipboard, "clipboard namespace")
 	addConfigFlag(cmd)
 
 	return cmd
 }
 
-func runCopy(v *viper.Viper) error {
+func runCopy(cmd *cobra.Command, v *viper.Viper) error {
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return fmt.Errorf("read stdin: %w", err)
@@ -53,63 +50,34 @@ func runCopy(v *viper.Viper) error {
 
 	mime := v.GetString("mime")
 	source := v.GetString("source")
+	clipboard := v.GetString("clipboard")
 
-	var item message.Item
-	if mime == "text/plain" {
-		item = message.NewTextItem(string(data))
-	} else {
-		item = message.NewBinaryItem(mime, data)
-	}
-
-	msg := &message.Message{
-		Type:      message.TypeClipboard,
-		Source:    source,
-		Clipboard: message.DefaultClipboard,
-		Items:     []message.Item{item},
-	}
-
-	// Try local daemon first
-	if ipc.IsRunning() {
-		conn, err := ipc.Dial()
-		if err == nil {
-			defer conn.Close()
-			wc := wire.New(conn, nil)
-			if err := wc.WriteMsg(msg); err != nil {
-				slog.Warn("ipc copy failed", "err", err)
-			} else {
-				return nil
-			}
-		}
-	}
-
-	// Fall back to direct server connection
-	serverAddr := v.GetString("server")
-	token := v.GetString("token")
-
-	var key *[32]byte
-	if token != "" {
-		key, err = crypto.DeriveKey(token)
+	var conn *grpc.ClientConn
+	if !cmd.Flags().Changed("server") && ipc.IsRunning() {
+		conn, err = dialIPC()
 		if err != nil {
-			return fmt.Errorf("key derivation: %w", err)
+			conn = nil
 		}
 	}
-
-	conn, err := net.DialTimeout("tcp", serverAddr, 5*time.Second)
-	if err != nil {
-		return fmt.Errorf("connect %s: %w", serverAddr, err)
+	if conn == nil {
+		serverAddr := v.GetString("server")
+		token := v.GetString("token")
+		conn, err = grpc.NewClient(serverAddr, dialOpts(token, source)...)
+		if err != nil {
+			return fmt.Errorf("dial: %w", err)
+		}
 	}
 	defer conn.Close()
 
-	wc := wire.New(conn, key)
-	if token != "" {
-		if err := wc.WriteMsg(&message.Message{
-			Type:    message.TypeAuth,
-			Source:  source,
-			Payload: encodeToken(token),
-		}); err != nil {
-			return fmt.Errorf("auth: %w", err)
-		}
+	client := pb.NewClipboardServiceClient(conn)
+	_, err = client.Copy(context.Background(), &pb.CopyRequest{
+		Source:    source,
+		Clipboard: clipboard,
+		Items:     []*pb.ClipboardItem{{Mime: mime, Data: data}},
+	})
+	if err != nil {
+		return fmt.Errorf("copy: %w", err)
 	}
-
-	return wc.WriteMsg(msg)
+	slog.Debug("copied", "mime", mime, "bytes", len(data))
+	return nil
 }

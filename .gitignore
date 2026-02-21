@@ -1,0 +1,18 @@
+# Build output
+bin/
+
+# macOS
+.DS_Store
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Go
+# (go.sum IS committed — it ensures reproducible builds)
+# gen/ IS committed — see README: regenerate with `make proto`
+
+# Config with secrets (the example is committed, not real configs)
+suffuse.toml

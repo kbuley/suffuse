@@ -1,0 +1,139 @@
+syntax = "proto3";
+
+package suffuse.v1;
+
+import "google/api/annotations.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "go.klb.dev/suffuse/gen/suffuse/v1;suffusev1";
+
+// ClipboardService provides real-time clipboard synchronisation between peers.
+// Both gRPC (binary) and HTTP/JSON (via grpc-gateway) transports are supported
+// on the same port using cmux.
+//
+// Authentication: pass a shared secret as
+//   gRPC  — Authorization: Bearer <token> in request metadata
+//   HTTP  — Authorization: Bearer <token> header
+service ClipboardService {
+  // Copy publishes clipboard content from the caller to all watching peers.
+  rpc Copy(CopyRequest) returns (CopyResponse) {
+    option (google.api.http) = {
+      post: "/v1/copy"
+      body: "*"
+    };
+  }
+
+  // Paste returns the most-recent clipboard content, optionally filtered by
+  // MIME type.
+  rpc Paste(PasteRequest) returns (PasteResponse) {
+    option (google.api.http) = {
+      post: "/v1/paste"
+      body: "*"
+    };
+  }
+
+  // Watch opens a server-streaming RPC that delivers clipboard events as they
+  // arrive. The client controls filtering via WatchRequest.
+  rpc Watch(WatchRequest) returns (stream WatchResponse) {
+    option (google.api.http) = {get: "/v1/watch"};
+  }
+
+  // Status returns a snapshot of all currently-connected peers.
+  rpc Status(StatusRequest) returns (StatusResponse) {
+    option (google.api.http) = {get: "/v1/status"};
+  }
+}
+
+// ClipboardItem carries a single MIME representation of clipboard content.
+// data is raw bytes; the JSON gateway automatically base64-encodes this field.
+message ClipboardItem {
+  string mime = 1;
+  bytes data = 2;
+}
+
+// ── Copy ────────────────────────────────────────────────────────────────────
+
+message CopyRequest {
+  // clipboard identifies the named clipboard (empty → "default").
+  string clipboard = 1;
+  // source is a human-readable label for the originating host.
+  string source = 2;
+  repeated ClipboardItem items = 3;
+}
+
+message CopyResponse {
+  // unimplemented
+}
+
+// ── Paste ───────────────────────────────────────────────────────────────────
+
+message PasteRequest {
+  string clipboard = 1;
+  // accepts is an optional MIME filter (empty = return all types).
+  repeated string accepts = 2;
+}
+
+message PasteResponse {
+  string source = 1;
+  string clipboard = 2;
+  repeated ClipboardItem items = 3;
+}
+
+// ── Watch ───────────────────────────────────────────────────────────────────
+
+message WatchRequest {
+  string clipboard = 1;
+  // accepts restricts which MIME types the server will send (empty = all).
+  // Example: ["text/plain"] lets a Neovim plugin ignore images server-side.
+  repeated string accepts = 2;
+  // metadata_only: if true, items is omitted from WatchResponse and the
+  // client should call Paste to retrieve content on demand.
+  bool metadata_only = 3;
+}
+
+// WatchResponse is delivered to Watch subscribers whenever the clipboard
+// changes.
+message WatchResponse {
+  string source = 1;
+  string clipboard = 2;
+  // items is empty when metadata_only was set in WatchRequest.
+  repeated ClipboardItem items = 3;
+  // available_types is always populated so metadata-only clients know what
+  // representations are available before calling Paste.
+  repeated string available_types = 4;
+}
+
+// ── Status ──────────────────────────────────────────────────────────────────
+
+message StatusRequest {
+  // unimplemented
+}
+
+// PeerInfo describes a single connected peer.
+message PeerInfo {
+  string source = 1;
+  string addr = 2;
+  // role is one of "client", "both" (server with local clipboard).
+  string role = 3;
+  string clipboard = 4;
+  repeated string accepted_types = 5;
+  google.protobuf.Timestamp connected_at = 6;
+  google.protobuf.Timestamp last_seen = 7;
+}
+
+message StatusResponse {
+  repeated PeerInfo peers = 1;
+  // client_info is populated by the IPC daemon when a CLI tool queries it
+  // over the Unix socket. Absent when querying the server directly via TCP.
+  ClientConnectionInfo client_info = 2;
+}
+
+// ClientConnectionInfo carries the daemon's upstream connection metadata,
+// allowing CLI tools to display transport/server/connected info without a
+// second TCP connection.
+message ClientConnectionInfo {
+  string server_addr = 1;
+  string source = 2;
+  google.protobuf.Timestamp connected_at = 3;
+  google.protobuf.Timestamp last_seen = 4;
+}

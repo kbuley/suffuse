@@ -1,4 +1,4 @@
-// Package localpeer implements the hub.Peer that owns the server's system clipboard.
+// Package localpeer implements the hub.Peer that owns the server's local system clipboard.
 package localpeer
 
 import (
@@ -7,9 +7,11 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	pb "go.klb.dev/suffuse/gen/suffuse/v1"
 	"go.klb.dev/suffuse/internal/clip"
 	"go.klb.dev/suffuse/internal/hub"
-	"go.klb.dev/suffuse/internal/message"
 )
 
 const peerID = "local"
@@ -18,48 +20,48 @@ const peerID = "local"
 type Peer struct {
 	h       *hub.Hub
 	backend clip.Backend
-	sendCh  chan *message.Message
+	source  string
+	sendCh  chan hub.Event
 
-	mu        sync.RWMutex
-	info      message.PeerInfo
-	lastSeen  time.Time
-	lastItems []message.Item
+	mu          sync.RWMutex
+	lastItems   []*pb.ClipboardItem
+	connectedAt time.Time
+	lastSeen    time.Time
 }
 
 // New creates the local peer but does not start it.
 func New(h *hub.Hub, backend clip.Backend, source string) *Peer {
 	now := time.Now()
 	return &Peer{
-		h:       h,
-		backend: backend,
-		sendCh:  make(chan *message.Message, 64),
-		info: message.PeerInfo{
-			ID:          peerID,
-			Source:      source,
-			Addr:        "local",
-			Role:        message.RoleBoth,
-			Clipboard:   message.DefaultClipboard,
-			ConnectedAt: now,
-			LastSeen:    now,
-		},
-		lastSeen: now,
+		h:           h,
+		backend:     backend,
+		source:      source,
+		sendCh:      make(chan hub.Event, 64),
+		connectedAt: now,
+		lastSeen:    now,
 	}
 }
 
 func (p *Peer) ID() string { return peerID }
 
-func (p *Peer) Info() message.PeerInfo {
+func (p *Peer) Info() *pb.PeerInfo {
 	p.mu.RLock()
-	defer p.mu.RUnlock()
-	info := p.info
-	info.LastSeen = p.lastSeen
-	return info
+	ls := p.lastSeen
+	p.mu.RUnlock()
+	return &pb.PeerInfo{
+		Source:      p.source,
+		Addr:        "local",
+		Role:        "both",
+		Clipboard:   hub.DefaultClipboard,
+		ConnectedAt: timestamppb.New(p.connectedAt),
+		LastSeen:    timestamppb.New(ls),
+	}
 }
 
-// Send implements hub.Peer — writes incoming clipboard updates to the local system clipboard.
-func (p *Peer) Send(msg *message.Message) {
+// Send implements hub.Peer — queues incoming clipboard updates to write to the local system clipboard.
+func (p *Peer) Send(ev hub.Event) {
 	select {
-	case p.sendCh <- msg:
+	case p.sendCh <- ev:
 	default:
 		slog.Warn("local peer send channel full, dropping")
 	}
@@ -73,29 +75,27 @@ func (p *Peer) Run() {
 
 	slog.Info("local clipboard peer started", "backend", p.backend.Name())
 
-	// Writer: apply incoming updates to the local clipboard.
+	// Writer: apply incoming hub events to the local clipboard.
 	go func() {
-		for msg := range p.sendCh {
-			if msg.Type != message.TypeClipboard || len(msg.Items) == 0 {
+		for ev := range p.sendCh {
+			if len(ev.Items) == 0 {
 				continue
 			}
 			p.mu.Lock()
-			if reflect.DeepEqual(msg.Items, p.lastItems) {
-				p.mu.Unlock()
+			same := reflect.DeepEqual(ev.Items, p.lastItems)
+			p.mu.Unlock()
+			if same {
 				continue
 			}
-			p.lastItems = msg.Items
+			if err := p.backend.Write(ev.Items); err != nil {
+				slog.Error("local clipboard write failed", "err", err)
+				continue
+			}
+			p.mu.Lock()
+			p.lastItems = ev.Items
 			p.lastSeen = time.Now()
 			p.mu.Unlock()
-
-			if err := p.backend.Write(msg.Items); err != nil {
-				slog.Error("local clipboard write failed", "err", err)
-			} else {
-				slog.Debug("local clipboard updated",
-					"source", msg.Source,
-					"items", len(msg.Items),
-				)
-			}
+			hub.LogItems("local clipboard updated", ev.Source, ev.Clipboard, ev.Items)
 		}
 	}()
 
@@ -109,17 +109,17 @@ func (p *Peer) Run() {
 		if len(items) == 0 {
 			continue
 		}
-
 		p.mu.Lock()
-		if reflect.DeepEqual(items, p.lastItems) {
-			p.mu.Unlock()
+		same := reflect.DeepEqual(items, p.lastItems)
+		if !same {
+			p.lastItems = items
+			p.lastSeen = time.Now()
+		}
+		p.mu.Unlock()
+		if same {
 			continue
 		}
-		p.lastItems = items
-		p.lastSeen = time.Now()
-		p.mu.Unlock()
-
-		slog.Debug("local clipboard changed, publishing", "items", len(items))
-		p.h.Publish(items, message.DefaultClipboard, peerID)
+		hub.LogItems("local clipboard changed, publishing", p.source, hub.DefaultClipboard, items)
+		p.h.Publish(items, hub.DefaultClipboard, peerID, p.source)
 	}
 }

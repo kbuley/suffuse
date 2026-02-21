@@ -1,23 +1,25 @@
 package main
 
 import (
-	"encoding/base64"
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
 
+	gwruntime "github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
+	"github.com/soheilhy/cmux"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/reflection"
 
+	pb "go.klb.dev/suffuse/gen/suffuse/v1"
 	"go.klb.dev/suffuse/internal/clip"
-	"go.klb.dev/suffuse/internal/crypto"
+	"go.klb.dev/suffuse/internal/grpcservice"
 	"go.klb.dev/suffuse/internal/hub"
 	"go.klb.dev/suffuse/internal/ipc"
 	"go.klb.dev/suffuse/internal/localpeer"
-	"go.klb.dev/suffuse/internal/message"
-	"go.klb.dev/suffuse/internal/tcppeer"
-	"go.klb.dev/suffuse/internal/wire"
 )
 
 func newServerCmd() *cobra.Command {
@@ -28,6 +30,12 @@ func newServerCmd() *cobra.Command {
 		Short: "Run the clipboard hub (+ local clipboard integration)",
 		Long: `Starts the suffuse hub. All connected clients share a clipboard.
 The server also participates as a local clipboard peer by default.
+
+Both gRPC and HTTP/JSON (grpc-gateway) are served on the same port.
+JSON clients (e.g. a Neovim plugin) can use standard HTTP against the same address.
+
+An IPC Unix socket is also opened so that local CLI tools (copy/paste/status)
+connect without a TCP round-trip.
 
 Config file search order:
   /etc/suffuse/suffuse.toml
@@ -41,8 +49,8 @@ Precedence (lowest → highest): defaults → config file → SUFFUSE_* env vars
 	}
 
 	f := cmd.Flags()
-	f.String("addr", "0.0.0.0:8752", "TCP listen address")
-	f.String("token", "", "shared secret (empty = no auth, no encryption)")
+	f.String("addr", "0.0.0.0:8752", "TCP listen address (serves both gRPC and HTTP/JSON)")
+	f.String("token", "", "shared secret (empty = no auth)")
 	f.Bool("no-local", false, "disable local clipboard integration (relay mode)")
 	f.String("source", defaultSource(), "name for this host in peer lists")
 	addLoggingFlags(cmd)
@@ -59,23 +67,15 @@ func runServer(v *viper.Viper) error {
 	noLocal := v.GetBool("no-local")
 	source := v.GetString("source")
 
-	var key *[32]byte
-	if token != "" {
-		var err error
-		key, err = crypto.DeriveKey(token)
-		if err != nil {
-			return fmt.Errorf("key derivation: %w", err)
-		}
-	}
-
 	slog.Info("suffuse server starting",
 		"version", Version,
 		"addr", addr,
 		"local_clip", !noLocal,
-		"encrypted", key != nil,
+		"auth", token != "",
 	)
 
 	h := hub.New()
+	svc := grpcservice.New(h, token)
 
 	if !noLocal {
 		backend := clip.New()
@@ -83,13 +83,31 @@ func runServer(v *viper.Viper) error {
 		go lp.Run()
 	}
 
-	// IPC socket for copy/paste/status CLI tools
-	ipcLn, err := ipc.Listen()
-	if err != nil {
+	grpcSrv := grpc.NewServer()
+	pb.RegisterClipboardServiceServer(grpcSrv, svc)
+	reflection.Register(grpcSrv)
+
+	// IPC socket: lets local CLI tools (copy/paste/status) avoid TCP.
+	// The server's own ClipboardService is served directly — no enrichment
+	// of StatusResponse.ClientInfo since there is no upstream connection.
+	if ln, err := ipc.Listen(); err != nil {
 		slog.Warn("IPC socket unavailable", "err", err)
 	} else {
 		slog.Info("IPC socket listening", "path", ipc.SocketPath())
-		go serveIPC(ipcLn, h)
+		ipcSrv := grpc.NewServer()
+		pb.RegisterClipboardServiceServer(ipcSrv, svc)
+		go ipcSrv.Serve(ln) //nolint:errcheck
+	}
+
+	// HTTP/JSON gateway dials back to the gRPC server on the same address.
+	gwMux := gwruntime.NewServeMux()
+	gwCtx, gwCancel := context.WithCancel(context.Background())
+	defer gwCancel()
+	if err := pb.RegisterClipboardServiceHandlerFromEndpoint(
+		gwCtx, gwMux, addr,
+		[]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())},
+	); err != nil {
+		return fmt.Errorf("gateway registration: %w", err)
 	}
 
 	ln, err := net.Listen("tcp", addr)
@@ -98,105 +116,14 @@ func runServer(v *viper.Viper) error {
 	}
 	slog.Info("listening", "addr", ln.Addr())
 
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			slog.Error("accept failed", "err", err)
-			continue
-		}
-		peer := tcppeer.New(conn, h, token, key)
-		go peer.Serve()
-	}
-}
+	// cmux routes gRPC (HTTP/2 + content-type: application/grpc) vs HTTP/1.1.
+	m := cmux.New(ln)
+	grpcL := m.MatchWithWriters(
+		cmux.HTTP2MatchHeaderFieldSendSettings("content-type", "application/grpc"),
+	)
+	httpL := m.Match(cmux.Any())
 
-func serveIPC(ln net.Listener, h *hub.Hub) {
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		go handleIPCConn(conn, h)
-	}
-}
-
-func handleIPCConn(conn net.Conn, h *hub.Hub) {
-	defer conn.Close()
-	wc := wire.New(conn, nil)
-
-	msg, err := wc.ReadMsg()
-	if err != nil {
-		return
-	}
-
-	switch msg.Type {
-	case message.TypeClipboard:
-		h.Publish(msg.Items, msg.ClipboardOf(), "ipc:copy")
-		slog.Debug("ipc: clipboard published", "items", len(msg.Items))
-
-	case message.TypeStatus:
-		peers := h.Peers()
-		hostname, _ := os.Hostname()
-		_ = wc.WriteMsg(&message.Message{
-			Type:  message.TypeStatusResponse,
-			Role:  message.RoleBoth,
-			Peers: peers,
-			Upstream: &message.UpstreamInfo{
-				Addr: hostname,
-			},
-		})
-
-	case message.TypePing:
-		// paste request — return latest clipboard via a transient peer registration
-		pp := &pastePeer{wc: wc, h: h, got: make(chan *message.Message, 1)}
-		pp.requestLatest(msg.ClipboardOf())
-	}
-}
-
-// pastePeer is a transient hub.Peer used to retrieve the latest clipboard value.
-type pastePeer struct {
-	wc  *wire.Conn
-	h   *hub.Hub
-	got chan *message.Message
-}
-
-func (p *pastePeer) ID() string { return "ipc:paste" }
-
-func (p *pastePeer) Info() message.PeerInfo {
-	return message.PeerInfo{
-		ID:        "ipc:paste",
-		Source:    "paste",
-		Clipboard: message.DefaultClipboard,
-	}
-}
-
-func (p *pastePeer) Send(msg *message.Message) {
-	select {
-	case p.got <- msg:
-	default:
-	}
-}
-
-func (p *pastePeer) requestLatest(clipboard string) {
-	p.h.Register(p)
-	defer p.h.Unregister(p)
-	select {
-	case msg := <-p.got:
-		_ = p.wc.WriteMsg(msg)
-	default:
-		_ = p.wc.WriteMsg(&message.Message{
-			Type:      message.TypeClipboard,
-			Clipboard: clipboard,
-		})
-	}
-}
-
-func encodeToken(token string) string {
-	return base64.StdEncoding.EncodeToString([]byte(token))
-}
-
-func defaultSource() string {
-	if h, err := os.Hostname(); err == nil {
-		return h
-	}
-	return "unknown"
+	go grpcSrv.Serve(grpcL)           //nolint:errcheck
+	go serveHTTPGateway(httpL, gwMux) //nolint:errcheck
+	return m.Serve()
 }

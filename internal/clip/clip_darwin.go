@@ -12,21 +12,16 @@ package clip
 import "C"
 
 import (
+	"fmt"
 	"log/slog"
 	"time"
 
 	"golang.design/x/clipboard"
 
-	"go.klb.dev/suffuse/internal/message"
+	pb "go.klb.dev/suffuse/gen/suffuse/v1"
 )
 
 const darwinPollInterval = 100 * time.Millisecond
-
-func init() {
-	if err := clipboard.Init(); err != nil {
-		slog.Warn("clipboard init failed", "err", err)
-	}
-}
 
 type darwinBackend struct {
 	lastChange C.NSInteger
@@ -35,7 +30,13 @@ type darwinBackend struct {
 }
 
 // New returns the macOS clipboard backend.
+// clipboard.Init is called here rather than in init() so that CLI sub-commands
+// (status, copy, paste) that never construct a Backend don't log spurious
+// warnings on headless systems.
 func New() Backend {
+	if err := clipboard.Init(); err != nil {
+		slog.Warn("clipboard init failed", "err", err)
+	}
 	b := &darwinBackend{
 		lastChange: C.suffuse_changeCount(),
 		watchCh:    make(chan struct{}, 1),
@@ -67,28 +68,26 @@ func (b *darwinBackend) poll() {
 	}
 }
 
-func (b *darwinBackend) Read() ([]message.Item, error) {
-	var items []message.Item
+func (b *darwinBackend) Read() ([]*pb.ClipboardItem, error) {
+	var items []*pb.ClipboardItem
 	if text := clipboard.Read(clipboard.FmtText); text != nil {
-		items = append(items, message.NewTextItem(string(text)))
+		items = append(items, &pb.ClipboardItem{Mime: "text/plain", Data: text})
 	}
 	if img := clipboard.Read(clipboard.FmtImage); img != nil {
-		items = append(items, message.NewBinaryItem("image/png", img))
+		items = append(items, &pb.ClipboardItem{Mime: "image/png", Data: img})
 	}
 	return items, nil
 }
 
-func (b *darwinBackend) Write(items []message.Item) error {
+func (b *darwinBackend) Write(items []*pb.ClipboardItem) error {
 	for _, it := range items {
-		data, err := it.Decode()
-		if err != nil {
-			continue
-		}
-		switch it.MIME {
+		switch it.Mime {
 		case "text/plain":
-			clipboard.Write(clipboard.FmtText, data)
+			clipboard.Write(clipboard.FmtText, it.Data)
 		case "image/png":
-			clipboard.Write(clipboard.FmtImage, data)
+			clipboard.Write(clipboard.FmtImage, it.Data)
+		default:
+			return fmt.Errorf("unsupported MIME type: %s", it.Mime)
 		}
 	}
 	return nil

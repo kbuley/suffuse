@@ -1,8 +1,9 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -10,11 +11,11 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"go.klb.dev/suffuse/internal/crypto"
+	pb "go.klb.dev/suffuse/gen/suffuse/v1"
 	"go.klb.dev/suffuse/internal/ipc"
-	"go.klb.dev/suffuse/internal/message"
-	"go.klb.dev/suffuse/internal/wire"
 )
 
 func newStatusCmd() *cobra.Command {
@@ -22,19 +23,18 @@ func newStatusCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Show connected peers and server status",
-		Long: `Displays all peers currently connected to the suffuse server,
-including source name, IP address, role, clipboard, and last-seen time.
+		Short: "Show connected peers",
+		Long: `Displays all peers currently connected to the suffuse server.
 
-If a local daemon is running, the request is proxied through it and enriched
-with local connection metadata. Otherwise connects directly to the server.`,
+If a local server or client daemon is running, the request is sent via the IPC
+Unix socket. Pass --server to target a specific server directly over TCP.`,
 		Args:    cobra.NoArgs,
 		PreRunE: func(cmd *cobra.Command, _ []string) error { return bindViper(cmd, v) },
-		RunE:    func(_ *cobra.Command, _ []string) error { return runStatus(v) },
+		RunE:    func(cmd *cobra.Command, _ []string) error { return runStatus(cmd, v) },
 	}
 
 	f := cmd.Flags()
-	f.String("server", "localhost:8752", "suffuse server address")
+	f.String("server", "localhost:8752", "suffuse server address (used when no daemon is running)")
 	f.String("token", "", "shared secret")
 	f.String("source", defaultSource(), "source identifier")
 	f.Bool("json", false, "output raw JSON")
@@ -43,99 +43,71 @@ with local connection metadata. Otherwise connects directly to the server.`,
 	return cmd
 }
 
-func runStatus(v *viper.Viper) error {
+func runStatus(cmd *cobra.Command, v *viper.Viper) error {
 	source := v.GetString("source")
-	token := v.GetString("token")
 	jsonOut := v.GetBool("json")
 
-	var resp *message.Message
+	var (
+		conn      *grpc.ClientConn
+		transport string
+		err       error
+	)
 
-	// Try local daemon first
-	if ipc.IsRunning() {
-		conn, err := ipc.Dial()
+	if !cmd.Flags().Changed("server") && ipc.IsRunning() {
+		conn, err = dialIPC()
 		if err == nil {
-			defer conn.Close()
-			wc := wire.New(conn, nil)
-			if err := wc.WriteMsg(&message.Message{
-				Type:   message.TypeStatus,
-				Source: source,
-			}); err == nil {
-				if msg, err := wc.ReadMsg(); err == nil {
-					resp = msg
-				}
-			}
+			transport = fmt.Sprintf("ipc (%s)", ipc.SocketPath())
+		} else {
+			conn = nil
 		}
 	}
 
-	// Fall back to direct server connection
-	if resp == nil {
+	if conn == nil {
 		serverAddr := v.GetString("server")
-		var key *[32]byte
-		if token != "" {
-			var err error
-			key, err = crypto.DeriveKey(token)
-			if err != nil {
-				return fmt.Errorf("key derivation: %w", err)
-			}
-		}
-
-		conn, err := net.DialTimeout("tcp", serverAddr, 5*time.Second)
+		token := v.GetString("token")
+		conn, err = grpc.NewClient(serverAddr, dialOpts(token, source)...)
 		if err != nil {
-			return fmt.Errorf("connect %s: %w", serverAddr, err)
+			return fmt.Errorf("dial: %w", err)
 		}
-		defer conn.Close()
-
-		wc := wire.New(conn, key)
-		if token != "" {
-			if err := wc.WriteMsg(&message.Message{
-				Type:    message.TypeAuth,
-				Source:  source,
-				Payload: encodeToken(token),
-			}); err != nil {
-				return fmt.Errorf("auth: %w", err)
-			}
-		}
-
-		if err := wc.WriteMsg(&message.Message{
-			Type:   message.TypeStatus,
-			Source: source,
-		}); err != nil {
-			return fmt.Errorf("status request: %w", err)
-		}
-
-		resp, err = wc.ReadMsg()
-		if err != nil {
-			return fmt.Errorf("status response: %w", err)
-		}
+		transport = fmt.Sprintf("tcp (%s)", serverAddr)
 	}
+	defer conn.Close()
 
-	if resp.Error != "" {
-		return fmt.Errorf("server error: %s", resp.Error)
+	client := pb.NewClipboardServiceClient(conn)
+	resp, err := client.Status(context.Background(), &pb.StatusRequest{})
+	if err != nil {
+		return fmt.Errorf("status: %w", err)
 	}
 
 	if jsonOut {
-		enc, _ := resp.Encode()
+		enc, _ := json.MarshalIndent(resp, "", "  ")
 		fmt.Println(string(enc))
 		return nil
 	}
 
-	printStatus(resp)
+	printStatus(resp, source, transport)
 	return nil
 }
 
-func printStatus(resp *message.Message) {
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "Role:\t%s\n", resp.Role)
-	if resp.Upstream != nil {
-		fmt.Fprintf(w, "Server:\t%s\n", resp.Upstream.Addr)
-		if !resp.Upstream.ConnectedAt.IsZero() {
-			fmt.Fprintf(w, "Connected:\t%s (%s ago)\n",
-				resp.Upstream.ConnectedAt.Format(time.RFC3339),
-				time.Since(resp.Upstream.ConnectedAt).Round(time.Second),
-			)
+func printStatus(resp *pb.StatusResponse, mySource, transport string) {
+	w := tabwriter.NewWriter(os.Stdout, 1, 0, 2, ' ', 0)
+
+	if ci := resp.ClientInfo; ci != nil {
+		// Connected via IPC client daemon — show upstream connection metadata.
+		fmt.Fprintf(w, "Role:\tclient\n")
+		fmt.Fprintf(w, "Transport:\t%s\n", transport)
+		fmt.Fprintf(w, "Server:\t%s\n", ci.ServerAddr)
+		if ci.ConnectedAt != nil && !ci.ConnectedAt.AsTime().IsZero() {
+			t := ci.ConnectedAt.AsTime()
+			fmt.Fprintf(w, "Connected:\t%s (%s ago)\n", t.UTC().Format(time.RFC3339), fmtAge(t))
 		}
+		if mySource == defaultSource() && ci.Source != "" {
+			mySource = ci.Source
+		}
+	} else {
+		fmt.Fprintf(w, "Transport:\t%s\n", transport)
 	}
-	fmt.Fprintf(w, "\n")
+	fmt.Fprintln(w)
 	_ = w.Flush()
 
 	if len(resp.Peers) == 0 {
@@ -143,26 +115,38 @@ func printStatus(resp *message.Message) {
 		return
 	}
 
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(tw, "SOURCE\tADDR\tROLE\tCLIPBOARD\tCONNECTED\tLAST SEEN\tACCEPTS\n")
-	fmt.Fprintf(tw, "------\t----\t----\t---------\t---------\t---------\t-------\n")
+	tw := tabwriter.NewWriter(os.Stdout, 1, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintf(tw, "\tSOURCE\tADDR\tROLE\tCLIPBOARD\tCONNECTED\tLAST SEEN\tACCEPTS\n")
+	_, _ = fmt.Fprintf(tw, "\t------\t----\t----\t---------\t---------\t---------\t-------\n")
 	for _, p := range resp.Peers {
 		accepts := "*"
 		if len(p.AcceptedTypes) > 0 {
 			accepts = strings.Join(p.AcceptedTypes, ",")
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			p.Source, p.Addr, p.Role, p.Clipboard,
-			fmtAge(p.ConnectedAt), fmtAge(p.LastSeen), accepts,
+		marker := ""
+		if p.Source == mySource {
+			marker = "*"
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			marker, p.Source, p.Addr, p.Role, p.Clipboard,
+			tsAge(p.ConnectedAt), tsAge(p.LastSeen), accepts,
 		)
 	}
 	_ = tw.Flush()
 }
 
-func fmtAge(t time.Time) string {
+func tsAge(ts *timestamppb.Timestamp) string {
+	if ts == nil {
+		return "-"
+	}
+	t := ts.AsTime()
 	if t.IsZero() {
 		return "-"
 	}
+	return fmtAge(t)
+}
+
+func fmtAge(t time.Time) string {
 	age := time.Since(t).Round(time.Second)
 	if age < time.Minute {
 		return fmt.Sprintf("%ds ago", int(age.Seconds()))

@@ -1,47 +1,58 @@
 // Package hub implements the central clipboard broker.
+// It is transport-agnostic: peers register, receive events via a channel,
+// and publish items. The hub uses proto types from gen/suffuse/v1.
 package hub
 
 import (
 	"log/slog"
 	"sync"
-	"time"
 
-	"go.klb.dev/suffuse/internal/message"
+	pb "go.klb.dev/suffuse/gen/suffuse/v1"
 )
 
-// Peer is anything that can receive messages from the hub.
+const DefaultClipboard = "default"
+
+// Event is a clipboard update delivered to a peer.
+type Event struct {
+	Source    string
+	Clipboard string
+	Items     []*pb.ClipboardItem
+}
+
+// Peer is anything that can receive clipboard events from the hub.
 type Peer interface {
 	ID() string
-	Info() message.PeerInfo
-	Send(*message.Message)
+	Info() *pb.PeerInfo
+	// Send delivers an event to the peer. Must be non-blocking.
+	Send(Event)
 }
 
 // Hub routes clipboard updates between all registered peers.
 type Hub struct {
-	mu     sync.RWMutex
-	peers  map[string]Peer
-	latest map[string][]message.Item // clipboard name → latest items
+	mu           sync.RWMutex
+	peers        map[string]Peer
+	latest       map[string][]*pb.ClipboardItem // clipboard → latest items
+	latestSource map[string]string              // clipboard → source name
 }
 
 // New returns an empty Hub.
 func New() *Hub {
 	return &Hub{
-		peers:  make(map[string]Peer),
-		latest: make(map[string][]message.Item),
+		peers:        make(map[string]Peer),
+		latest:       make(map[string][]*pb.ClipboardItem),
+		latestSource: make(map[string]string),
 	}
 }
 
-// Register adds a peer and immediately sends it the latest clipboard contents
+// Register adds a peer and immediately delivers the latest clipboard contents
 // for its subscribed clipboard.
 func (h *Hub) Register(p Peer) {
 	h.mu.Lock()
 	h.peers[p.ID()] = p
 	info := p.Info()
-	cb := info.Clipboard
-	if cb == "" {
-		cb = message.DefaultClipboard
-	}
+	cb := canonicalize(info.Clipboard)
 	latest := h.latest[cb]
+	src := h.latestSource[cb]
 	total := len(h.peers)
 	h.mu.Unlock()
 
@@ -53,14 +64,9 @@ func (h *Hub) Register(p Peer) {
 	)
 
 	if len(latest) > 0 {
-		filtered := (&message.Message{Items: latest}).FilterItems(info.AcceptedTypes)
+		filtered := filterItems(latest, info.AcceptedTypes)
 		if len(filtered) > 0 {
-			p.Send(&message.Message{
-				Type:      message.TypeClipboard,
-				Source:    "hub",
-				Clipboard: cb,
-				Items:     filtered,
-			})
+			p.Send(Event{Source: src, Clipboard: cb, Items: filtered})
 		}
 	}
 }
@@ -79,15 +85,14 @@ func (h *Hub) Unregister(p Peer) {
 	)
 }
 
-// Publish stores items as the latest clipboard and fans the message out to
-// every peer on the same clipboard except the origin.
-func (h *Hub) Publish(items []message.Item, clipboard, originID string) {
-	if clipboard == "" {
-		clipboard = message.DefaultClipboard
-	}
+// Publish stores items as the latest clipboard and fans out to all peers on
+// the same clipboard except the origin.
+func (h *Hub) Publish(items []*pb.ClipboardItem, clipboardName, originID, source string) {
+	cb := canonicalize(clipboardName)
 
 	h.mu.Lock()
-	h.latest[clipboard] = items
+	h.latest[cb] = items
+	h.latestSource[cb] = source
 
 	type target struct {
 		peer     Peer
@@ -99,40 +104,64 @@ func (h *Hub) Publish(items []message.Item, clipboard, originID string) {
 			continue
 		}
 		info := p.Info()
-		pCb := info.Clipboard
-		if pCb == "" {
-			pCb = message.DefaultClipboard
-		}
-		if pCb == clipboard {
+		if canonicalize(info.Clipboard) == cb {
 			targets = append(targets, target{p, info.AcceptedTypes})
 		}
 	}
 	h.mu.Unlock()
 
 	for _, t := range targets {
-		filtered := (&message.Message{Items: items}).FilterItems(t.accepted)
+		filtered := filterItems(items, t.accepted)
 		if len(filtered) == 0 {
 			continue
 		}
-		t.peer.Send(&message.Message{
-			Type:      message.TypeClipboard,
-			Source:    originID,
-			Clipboard: clipboard,
-			Items:     filtered,
-		})
+		t.peer.Send(Event{Source: source, Clipboard: cb, Items: filtered})
 	}
 }
 
-// Peers returns a snapshot of all current peer metadata.
-func (h *Hub) Peers() []message.PeerInfo {
+// Latest returns the most recent items and source for the named clipboard,
+// optionally filtered by accepted MIME types.
+func (h *Hub) Latest(clipboardName string, accept []string) ([]*pb.ClipboardItem, string) {
+	cb := canonicalize(clipboardName)
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	out := make([]message.PeerInfo, 0, len(h.peers))
+	return filterItems(h.latest[cb], accept), h.latestSource[cb]
+}
+
+// Peers returns a snapshot of all current peer metadata.
+func (h *Hub) Peers() []*pb.PeerInfo {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	out := make([]*pb.PeerInfo, 0, len(h.peers))
 	for _, p := range h.peers {
 		out = append(out, p.Info())
 	}
 	return out
 }
 
-// UpdateLastSeen is a hook for implementations that centralise the timestamp.
-func (h *Hub) UpdateLastSeen(_ string, _ time.Time) {}
+// canonicalize returns the effective clipboard name, defaulting to "default".
+func canonicalize(s string) string {
+	if s == "" {
+		return DefaultClipboard
+	}
+	return s
+}
+
+// filterItems returns only items whose MIME type is in accepted.
+// If accepted is empty all items are returned unchanged.
+func filterItems(items []*pb.ClipboardItem, accepted []string) []*pb.ClipboardItem {
+	if len(accepted) == 0 {
+		return items
+	}
+	set := make(map[string]struct{}, len(accepted))
+	for _, a := range accepted {
+		set[a] = struct{}{}
+	}
+	var out []*pb.ClipboardItem
+	for _, it := range items {
+		if _, ok := set[it.Mime]; ok {
+			out = append(out, it)
+		}
+	}
+	return out
+}

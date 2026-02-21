@@ -11,19 +11,22 @@
 # ── Server ─────────────────────────────────────────────────────────────────
 
 # TCP address to listen on.
+# Serves both gRPC and HTTP/JSON (grpc-gateway) on the same port.
 # Default: 0.0.0.0:8752
 # Env:     SUFFUSE_ADDR
 addr = "0.0.0.0:8752"
 
 # Shared secret. If set, all clients must supply the same token.
-# The token is also used to derive the NaCl secretbox encryption key,
-# so setting it enables both auth and encryption in one step.
-# Leave empty to disable auth and encryption (fine for trusted LANs).
+# Sent as "Authorization: Bearer <token>" — works identically for gRPC and
+# HTTP/JSON clients (e.g. Neovim plugin).
+# Leave empty to disable auth (fine for trusted LANs).
 # Env: SUFFUSE_TOKEN
 token = ""
 
 # Human-readable name shown in peer lists for this host's local clipboard.
-# Defaults to the system hostname if unset.
+# Defaults to the system hostname. In containers, automatically derived from
+# CONTAINER_NAME / COMPOSE_SERVICE / SERVICE_NAME env vars, or prefixed from
+# the container ID hash (e.g. "container-546a8399").
 # Env: SUFFUSE_SOURCE
 # source = "macbook"
 
@@ -39,21 +42,18 @@ token = ""
 # Env:     SUFFUSE_SERVER
 server = "localhost:8752"
 
-# MIME types this client will accept from the server.
-# Empty means accept all types (the default for host machines).
-# Restrict to text/plain on clients that cannot handle images (containers, Neovim plugin).
+# MIME types this client will accept from the server (server-side filter).
+# Empty means accept all types.
+# Restrict to text/plain on text-only clients (containers, Neovim plugin).
 #
-# Valid values (these are the only two types the clipboard backend supports):
-#   "text/plain"  — plain text
-#   "image/png"   — PNG image
-#
-# TOML format (array literal):
-#   accept = ["text/plain", "image/png"]
-#
-# Env var format (comma-separated, no brackets):
-#   SUFFUSE_ACCEPT=text/plain,image/png
+# TOML:  accept = ["text/plain", "image/png"]
+# Env:   SUFFUSE_ACCEPT=text/plain,image/png
 #
 # accept = ["text/plain"]
+
+# Named clipboard namespace. Empty means "default".
+# Env: SUFFUSE_CLIPBOARD
+# clipboard = "default"
 
 # ── Logging ────────────────────────────────────────────────────────────────
 

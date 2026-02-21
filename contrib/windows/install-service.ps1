@@ -33,16 +33,23 @@ function Register-SuffuseService {
     Write-Host "Created service: $Name"
 }
 
+
+$serverArgs = "server --addr `"$Addr`""
+if ($Token) { $serverArgs += " --token `"$Token`"" }
+
 Register-SuffuseService `
     -Name "SuffuseServer" `
     -DisplayName "Suffuse Clipboard Hub" `
-    -Args "server --addr `"$Addr`" $(if ($Token) { "--token `"$Token`"" })" `
+    -Args $serverArgs `
     -Description "Suffuse shared clipboard hub. Distributes clipboard content to all connected clients."
+
+$clientArgs = "client --server `"$Server`""
+if ($Token) { $clientArgs += " --token `"$Token`"" }
 
 Register-SuffuseService `
     -Name "SuffuseClient" `
     -DisplayName "Suffuse Clipboard Client" `
-    -Args "client --server `"$Server`" $(if ($Token) { "--token `"$Token`"" })" `
+    -Args $clientArgs `
     -Description "Suffuse shared clipboard client. Syncs the local clipboard with the hub."
 
 Write-Host ""

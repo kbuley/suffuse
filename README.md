@@ -1,7 +1,46 @@
 # suffuse
 
+![suffuse](suffuse.png)
+
+**Copy here. Paste there.**
+
 Shared clipboard over TCP — synchronises the system clipboard across machines,
 containers, and SSH sessions.
+
+### Why do it?
+
+I do most of my development inside devcontainers — Neovim running in a Docker
+container on my Mac. It’s a great setup until I need to copy something out of
+the editor and paste it somewhere on the host, or vice versa. The clipboard
+just doesn’t cross that boundary. I end up doing ridiculous things:
+screenshotting text, mailing myself snippets, or just retyping things I can
+already see on screen.
+
+I looked for a solution and found nothing that wasn’t either tied to a specific
+editor, required a GUI, or involved so much configuration that it wasn’t worth
+it. So I built suffuse.
+
+### Why 'suffuse'?
+
+The name comes from the word “suffuse” — to spread through or over something.
+That’s all it does: whatever you copy spreads to wherever you’re working.
+
+### Why port 8752?
+
+Every service on a network needs a port number, right? I decided to map the word **CLIP** to its alphabetical positions and treat the resulting sequence as coefficients in a **Base 13** expansion:
+
+| Letter    | Alphabet Position | Calculation      | Result   |
+| :-------- | :---------------- | :--------------- | :------- |
+| **C**     | 3                 | $3 \times 13^3$  | 6591     |
+| **L**     | 12                | $12 \times 13^2$ | 2028     |
+| **I**     | 9                 | $9 \times 13^1$  | 117      |
+| **P**     | 16                | $16 \times 13^0$ | 16       |
+| **Total** |                   |                  | **8752** |
+
+**The Formula:**
+$$3(13^3) + 12(13^2) + 9(13^1) + 16(13^0) = 8752$$
+
+This provides a unique, non-standard port and a cool origin story.
 
 ## Installation
 
@@ -164,11 +203,11 @@ Get-EventLog -LogName Application -Source SuffuseServer -Newest 50
 
 Config file locations:
 
-| Scenario | Path |
-|----------|------|
-| Service (SYSTEM account) | `C:\ProgramData\suffuse\suffuse.toml` |
-| Interactive CLI (per-user) | `%APPDATA%\suffuse\suffuse.toml` |
-| Override | `suffuse --config C:\path\to\suffuse.toml` |
+| Scenario                   | Path                                       |
+| -------------------------- | ------------------------------------------ |
+| Service (SYSTEM account)   | `C:\ProgramData\suffuse\suffuse.toml`      |
+| Interactive CLI (per-user) | `%APPDATA%\suffuse\suffuse.toml`           |
+| Override                   | `suffuse --config C:\path\to\suffuse.toml` |
 
 The install script creates `C:\ProgramData\suffuse\` automatically.
 
@@ -231,6 +270,6 @@ contrib/
 
 ## License
 
-GPLv2
+GPLv3
 
 [latest release]: https://github.com/kbuley/suffuse/releases/latest

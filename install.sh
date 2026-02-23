@@ -19,17 +19,16 @@ NO_SERVICE="${SUFFUSE_NO_SERVICE:-0}"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-ok()    { printf '\033[1;32m  ✓\033[0m %s\n' "$*"; }
-warn()  { printf '\033[1;33m  !\033[0m %s\n' "$*"; }
+info()  { printf '\033[1;34m==>\033[0m %s\n' "$*" >&2; }
+ok()    { printf '\033[1;32m  ✓\033[0m %s\n' "$*" >&2; }
+warn()  { printf '\033[1;33m  !\033[0m %s\n' "$*" >&2; }
 die()   { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
-ask()   { printf '\033[1;33m  ?\033[0m %s ' "$*"; }
+ask()   { printf '\033[1;33m  ?\033[0m %s ' "$*" >&2; }
 
 need() { command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"; }
 
 is_interactive() { [ -t 0 ] && [ -t 1 ]; }
 
-# Portable sed -i: GNU (Linux) vs BSD (macOS)
 sed_inplace() {
     if sed --version 2>/dev/null | grep -q GNU; then
         sed -i "$1" "$2"
@@ -58,7 +57,6 @@ detect_arch() {
 
 # ── Linux install scope ───────────────────────────────────────────────────────
 
-# Returns 'user' or 'system'
 choose_linux_scope() {
     if [ -n "${SUFFUSE_SCOPE:-}" ]; then
         case "$SUFFUSE_SCOPE" in
@@ -67,9 +65,7 @@ choose_linux_scope() {
         esac
     fi
 
-    if [ -n "${SUFFUSE_BIN_DIR:-}" ]; then
-        echo "user"; return
-    fi
+    [ -n "${SUFFUSE_BIN_DIR:-}" ] && { echo "user"; return; }
 
     if ! is_interactive; then
         warn "Non-interactive install — defaulting to per-user installation."
@@ -87,9 +83,9 @@ choose_linux_scope() {
     printf '\n'
     printf '  [2] System-wide\n'
     printf '        Binary:   /usr/local/bin/suffuse\n'
-    printf '        Service:  systemd system unit — shared across all users on this machine\n'
+    printf '        Service:  systemd system unit — shared across all users\n'
     printf '        Sudo:     required\n'
-    printf '        Note:     appropriate for a dedicated relay/hub or a single-user machine.\n'
+    printf '        Note:     appropriate for a relay/hub or single-user machine.\n'
     printf '                  On multi-user servers all SSH sessions share one clipboard.\n'
     printf '\n'
 
@@ -104,7 +100,6 @@ choose_linux_scope() {
     done
 }
 
-# Returns 'yes' or 'no'
 ask_no_local() {
     if [ -n "${SUFFUSE_NO_LOCAL:-}" ]; then
         case "$SUFFUSE_NO_LOCAL" in
@@ -113,9 +108,7 @@ ask_no_local() {
         esac
     fi
 
-    if ! is_interactive; then
-        echo "no"; return
-    fi
+    ! is_interactive && { echo "no"; return; }
 
     printf '\n'
     info "Does this machine have a local display and clipboard?"
@@ -138,9 +131,8 @@ ask_no_local() {
 # ── Resolve paths ─────────────────────────────────────────────────────────────
 
 bin_dir_for() {
-    local scope="$1"
     [ -n "${SUFFUSE_BIN_DIR:-}" ] && { echo "$SUFFUSE_BIN_DIR"; return; }
-    case "$scope" in
+    case "$1" in
         user)   echo "${HOME}/.local/bin" ;;
         system) echo "/usr/local/bin" ;;
     esac
@@ -155,7 +147,7 @@ resolve_version() {
         | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/'
 }
 
-# ── Download + verify ─────────────────────────────────────────────────────────
+# ── Download + verify + extract ───────────────────────────────────────────────
 
 download_binary() {
     local version="$1" os="$2" arch="$3"
@@ -173,7 +165,8 @@ download_binary() {
 
     info "Verifying checksum"
     local expected actual
-    expected="$(grep "${filename}" "${tmp}/checksums.txt" | awk '{print $1}')"
+    # checksums.txt format: "<hash>  <filename>" (two spaces)
+    expected="$(awk -v f="${filename}" '$2 == f {print $1}' "${tmp}/checksums.txt")"
     [ -n "$expected" ] || die "Checksum not found for ${filename} in checksums.txt"
 
     if command -v sha256sum >/dev/null 2>&1; then
@@ -181,7 +174,7 @@ download_binary() {
     elif command -v shasum >/dev/null 2>&1; then
         actual="$(shasum -a 256 "${tmp}/${filename}" | awk '{print $1}')"
     else
-        die "Neither sha256sum nor shasum found — cannot verify checksum"
+        die "Neither sha256sum nor shasum found"
     fi
     [ "$actual" = "$expected" ] || die "Checksum mismatch
   expected: ${expected}
@@ -217,7 +210,7 @@ install_binary() {
     esac
 }
 
-# ── Service: macOS (always per-user launchd agent) ────────────────────────────
+# ── Service: macOS ────────────────────────────────────────────────────────────
 
 install_service_darwin() {
     local bin_dst="$1"
@@ -251,7 +244,7 @@ install_service_darwin() {
     printf '  Config:  ~/.config/suffuse/suffuse.toml\n\n'
 }
 
-# ── Service: Linux system (sudo, /etc/systemd/system) ────────────────────────
+# ── Service: Linux system ─────────────────────────────────────────────────────
 
 install_service_linux_system() {
     local bin_dst="$1" no_local="$2"
@@ -279,7 +272,7 @@ install_service_linux_system() {
     printf '  Config:  /etc/suffuse/suffuse.toml\n\n'
 }
 
-# ── Service: Linux user (no sudo, ~/.config/systemd/user) ────────────────────
+# ── Service: Linux user ───────────────────────────────────────────────────────
 
 install_service_linux_user() {
     local bin_dst="$1"
@@ -307,7 +300,6 @@ install_service_linux_user() {
         -o "$svc"
 
     sed_inplace "s|ExecStart=.*|ExecStart=${bin_dst} server|" "$svc"
-    # Remove directives that require system privileges in user units
     sed_inplace '/^ProtectSystem/d'  "$svc"
     sed_inplace '/^ProtectHome/d'    "$svc"
     sed_inplace '/^PrivateTmp/d'     "$svc"
@@ -331,8 +323,10 @@ install_service_linux_user() {
 
 main() {
     need curl
+    need tar
 
     local os arch version tmp_bin bin_dir bin_dst
+    local scope="user" use_sudo="no" no_local="no"
 
     os="$(detect_os)"
     arch="$(detect_arch)"
@@ -341,20 +335,13 @@ main() {
     printf '\n'
     info "suffuse ${version} — ${os}/${arch}"
 
-    # macOS: always per-user, no prompts needed
-    # Linux: prompt for scope and relay mode
-    local scope="user" use_sudo="no" no_local="no"
-
     case "$os" in
         linux)
             scope="$(choose_linux_scope)"
             [ "$scope" = "system" ] && use_sudo="yes"
-            # Only ask about relay mode for system installs —
-            # per-user installs are almost always on a machine with a display
             [ "$scope" = "system" ] && no_local="$(ask_no_local)"
             ;;
         darwin)
-            # No choices on macOS — always user scope, always has a display
             ;;
     esac
 
@@ -371,9 +358,9 @@ main() {
     fi
 
     case "${os}:${scope}" in
-        darwin:*)      install_service_darwin           "$bin_dst" ;;
-        linux:system)  install_service_linux_system     "$bin_dst" "$no_local" ;;
-        linux:user)    install_service_linux_user       "$bin_dst" ;;
+        darwin:*)     install_service_darwin        "$bin_dst" ;;
+        linux:system) install_service_linux_system  "$bin_dst" "$no_local" ;;
+        linux:user)   install_service_linux_user    "$bin_dst" ;;
     esac
 
     ok "suffuse ${version} installed successfully"

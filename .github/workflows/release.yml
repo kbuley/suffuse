@@ -1,0 +1,138 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write  # needed to create GitHub Releases and upload assets
+
+jobs:
+  # ── test ──────────────────────────────────────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install apt dependencies
+        run: sudo apt-get update -q && sudo apt-get install -y -q libx11-dev
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+  # ── build macOS ───────────────────────────────────────────────────────────
+  build-darwin:
+    runs-on: macos-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed for git describe in LDFLAGS
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build darwin binaries
+        run: make build-darwin-universal
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-binaries
+          path: |
+            bin/suffuse-darwin-arm64
+            bin/suffuse-darwin-amd64
+            bin/suffuse-darwin-universal
+
+  # ── build Linux ───────────────────────────────────────────────────────────
+  build-linux:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install cross-compilation deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q \
+            libx11-dev \
+            gcc-x86-64-linux-gnu \
+            gcc-aarch64-linux-gnu
+
+      - name: Build linux binaries
+        run: make build-linux-native
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-binaries
+          path: |
+            bin/suffuse-linux-amd64
+            bin/suffuse-linux-arm64
+
+  # ── build Windows ─────────────────────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build windows binary
+        run: go build -ldflags "-X main.Version=${{ github.ref_name }}" -o bin/suffuse-windows.exe ./cmd/suffuse
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-binaries
+          path: bin/suffuse-windows.exe
+
+  # ── release ───────────────────────────────────────────────────────────────
+  release:
+    runs-on: ubuntu-latest
+    needs: [build-darwin, build-linux, build-windows]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts into release/
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+          chmod +x release/suffuse-darwin-* release/suffuse-linux-* || true
+          ls -lh release/
+
+      - name: Generate checksums
+        working-directory: release
+        run: sha256sum * > checksums.txt && cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

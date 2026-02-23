@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  dev.klb.suffuse.plist — launchd agent for suffuse server (macOS)
+
+  Install via install.sh, or manually:
+    cp dev.klb.suffuse.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/dev.klb.suffuse.plist
+
+  All peers on the same network must use the same SUFFUSE_TOKEN.
+  Default token is "suffuse" (encrypted, but any default suffuse instance
+  can connect). Set a custom value to restrict access to known peers.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.klb.suffuse</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/suffuse</string>
+        <string>server</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Shared secret for TLS key derivation + per-RPC auth.
+             All peers must use the same value. Default is "suffuse". -->
+        <!-- <key>SUFFUSE_TOKEN</key><string>changeme</string> -->
+
+        <!-- Listen address (default: 0.0.0.0:8752) -->
+        <!-- <key>SUFFUSE_ADDR</key><string>0.0.0.0:8752</string> -->
+
+        <!-- Human-readable name shown in peer lists (default: hostname) -->
+        <!-- <key>SUFFUSE_SOURCE</key><string>macbook</string> -->
+
+        <!-- Disable local clipboard, run as relay only -->
+        <!-- <key>SUFFUSE_NO_LOCAL</key><string>true</string> -->
+
+        <!-- Federation: connect to another suffuse server -->
+        <!-- <key>SUFFUSE_UPSTREAM_HOST</key><string>hub.example.com</string> -->
+        <!-- <key>SUFFUSE_UPSTREAM_PORT</key><string>8752</string> -->
+        <!-- <key>SUFFUSE_UPSTREAM_TOKEN</key><string>changeme</string> -->
+
+        <!-- Log level: debug | info | warn | error -->
+        <!-- <key>SUFFUSE_LOG_LEVEL</key><string>info</string> -->
+
+        <!-- Log format: auto | text | json -->
+        <!-- <key>SUFFUSE_LOG_FORMAT</key><string>json</string> -->
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/suffuse.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/suffuse.log</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Throttle restart on repeated failures -->
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+</dict>
+</plist>

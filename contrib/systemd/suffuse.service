@@ -1,0 +1,58 @@
+[Unit]
+Description=suffuse shared clipboard hub
+Documentation=https://github.com/kbuley/suffuse
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/suffuse server
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=suffuse
+
+# ── Security ──────────────────────────────────────────────────────────────────
+# Shared secret for TLS key derivation + per-RPC auth.
+# All peers on the same network must use the same token value.
+# Default is "suffuse" (traffic is encrypted, but any default suffuse instance
+# can connect). Set a custom value to restrict access to known peers.
+# Environment=SUFFUSE_TOKEN=changeme
+
+# ── Optional ──────────────────────────────────────────────────────────────────
+# Listen address (default: 0.0.0.0:8752)
+# Environment=SUFFUSE_ADDR=0.0.0.0:8752
+
+# Human-readable name shown in peer lists (default: hostname)
+# Environment=SUFFUSE_SOURCE=myserver
+
+# Disable local clipboard integration (relay/hub-only mode)
+# Environment=SUFFUSE_NO_LOCAL=true
+
+# Log verbosity: debug | info | warn | error  (default: info)
+# Environment=SUFFUSE_LOG_LEVEL=info
+
+# Log format: auto | text | json  (default: json when not a TTY)
+Environment=SUFFUSE_LOG_FORMAT=json
+
+# ── Federation ────────────────────────────────────────────────────────────────
+# Connect to another suffuse server to form a federated cluster.
+# The upstream token defaults to SUFFUSE_TOKEN if not set separately.
+# Environment=SUFFUSE_UPSTREAM_HOST=hub.example.com
+# Environment=SUFFUSE_UPSTREAM_PORT=8752
+# Environment=SUFFUSE_UPSTREAM_TOKEN=changeme
+# Environment=SUFFUSE_UPSTREAM_SOURCE=this-node
+
+# ── Config file alternative ───────────────────────────────────────────────────
+# All of the above can also be set in /etc/suffuse/suffuse.toml
+# See /usr/share/doc/suffuse/suffuse.toml.example
+
+# ── Hardening ─────────────────────────────────────────────────────────────────
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/tmp
+
+[Install]
+WantedBy=multi-user.target

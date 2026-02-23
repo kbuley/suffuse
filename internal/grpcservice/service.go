@@ -17,16 +17,24 @@ import (
 	"go.klb.dev/suffuse/internal/hub"
 )
 
+// UpstreamInfoProvider can optionally be implemented by the federation layer
+// to supply upstream connection metadata for Status responses.
+type UpstreamInfoProvider interface {
+	UpstreamInfo() *pb.UpstreamInfo
+}
+
 // Service implements pb.ClipboardServiceServer.
 type Service struct {
 	pb.UnimplementedClipboardServiceServer
-	h     *hub.Hub
-	token string // empty = no auth
+	h        *hub.Hub
+	token    string
+	upstream UpstreamInfoProvider // nil when not federated
 }
 
 // New returns a Service backed by h. token may be empty to disable auth.
-func New(h *hub.Hub, token string) *Service {
-	return &Service{h: h, token: token}
+// upstream may be nil for standalone servers.
+func New(h *hub.Hub, token string, upstream UpstreamInfoProvider) *Service {
+	return &Service{h: h, token: token, upstream: upstream}
 }
 
 // Copy implements ClipboardService.Copy.
@@ -82,7 +90,7 @@ func (s *Service) Watch(req *pb.WatchRequest, stream pb.ClipboardService_WatchSe
 	s.h.Register(wp)
 	defer s.h.Unregister(wp)
 
-	slog.Info("watch started", "peer", id, "accept", req.Accepts, "metadata_only", req.MetadataOnly)
+	slog.Info("watch started", "peer", id, "accepts", req.Accepts, "metadata_only", req.MetadataOnly)
 
 	for {
 		select {
@@ -116,7 +124,11 @@ func (s *Service) Status(ctx context.Context, _ *pb.StatusRequest) (*pb.StatusRe
 	if err := s.auth(ctx); err != nil {
 		return nil, err
 	}
-	return &pb.StatusResponse{Peers: s.h.Peers()}, nil
+	resp := &pb.StatusResponse{Peers: s.h.Peers()}
+	if s.upstream != nil {
+		resp.UpstreamInfo = s.upstream.UpstreamInfo()
+	}
+	return resp, nil
 }
 
 // auth validates the bearer token in ctx metadata. Skipped when s.token is empty.

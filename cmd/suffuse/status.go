@@ -24,17 +24,33 @@ func newStatusCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show connected peers",
-		Long: `Displays all peers currently connected to the suffuse server.
+		Long: `Displays all peers currently connected to the suffuse server,
+including source name, address, role, clipboard, and last-seen time.
 
-If a local server or client daemon is running, the request is sent via the IPC
-Unix socket. Pass --server to target a specific server directly over TCP.`,
+Connects via the local IPC socket when a daemon is running on this host.
+Pass --host to query a remote server directly over TCP.
+
+Flags and their environment variables / config-file keys
+  --host    SUFFUSE_HOST    host
+  --port    SUFFUSE_PORT    port    (default: 8752)
+  --token   SUFFUSE_TOKEN   token
+  --source  SUFFUSE_SOURCE  source
+  --json    (no env/config equivalent)
+
+Config file search order (first found wins)
+  /etc/suffuse/suffuse.toml
+  $HOME/.config/suffuse/suffuse.toml
+  path supplied via --config
+
+Precedence: defaults → config file → SUFFUSE_* env vars → CLI flags`,
 		Args:    cobra.NoArgs,
 		PreRunE: func(cmd *cobra.Command, _ []string) error { return bindViper(cmd, v) },
 		RunE:    func(cmd *cobra.Command, _ []string) error { return runStatus(cmd, v) },
 	}
 
 	f := cmd.Flags()
-	f.String("server", "localhost:8752", "suffuse server address (used when no daemon is running)")
+	f.String("host", "", "suffuse server host (probes docker/podman/localhost if unset)")
+	f.Int("port", 8752, "suffuse server port")
 	f.String("token", "", "shared secret")
 	f.String("source", defaultSource(), "source identifier")
 	f.Bool("json", false, "output raw JSON")
@@ -44,7 +60,10 @@ Unix socket. Pass --server to target a specific server directly over TCP.`,
 }
 
 func runStatus(cmd *cobra.Command, v *viper.Viper) error {
-	source := v.GetString("source")
+	source  := v.GetString("source")
+	token   := v.GetString("token")
+	host    := v.GetString("host")
+	port    := v.GetInt("port")
 	jsonOut := v.GetBool("json")
 
 	var (
@@ -53,7 +72,7 @@ func runStatus(cmd *cobra.Command, v *viper.Viper) error {
 		err       error
 	)
 
-	if !cmd.Flags().Changed("server") && ipc.IsRunning() {
+	if !cmd.Flags().Changed("host") && ipc.IsRunning() {
 		conn, err = dialIPC()
 		if err == nil {
 			transport = fmt.Sprintf("ipc (%s)", ipc.SocketPath())
@@ -63,13 +82,15 @@ func runStatus(cmd *cobra.Command, v *viper.Viper) error {
 	}
 
 	if conn == nil {
-		serverAddr := v.GetString("server")
-		token := v.GetString("token")
-		conn, err = grpc.NewClient(serverAddr, dialOpts(token, source)...)
+		conn, err = dialServer(host, port, token, source)
 		if err != nil {
 			return fmt.Errorf("dial: %w", err)
 		}
-		transport = fmt.Sprintf("tcp (%s)", serverAddr)
+		if host != "" {
+			transport = fmt.Sprintf("tcp (%s:%d)", host, port)
+		} else {
+			transport = fmt.Sprintf("tcp (port %d, auto-probed)", port)
+		}
 	}
 	defer conn.Close()
 
@@ -92,20 +113,16 @@ func runStatus(cmd *cobra.Command, v *viper.Viper) error {
 func printStatus(resp *pb.StatusResponse, mySource, transport string) {
 	w := tabwriter.NewWriter(os.Stdout, 1, 0, 2, ' ', 0)
 
-	if ci := resp.ClientInfo; ci != nil {
-		// Connected via IPC client daemon — show upstream connection metadata.
-		fmt.Fprintf(w, "Role:\tclient\n")
-		fmt.Fprintf(w, "Transport:\t%s\n", transport)
-		fmt.Fprintf(w, "Server:\t%s\n", ci.ServerAddr)
-		if ci.ConnectedAt != nil && !ci.ConnectedAt.AsTime().IsZero() {
-			t := ci.ConnectedAt.AsTime()
+	fmt.Fprintf(w, "Transport:\t%s\n", transport)
+	if ui := resp.UpstreamInfo; ui != nil {
+		fmt.Fprintf(w, "Upstream:\t%s\n", ui.Addr)
+		if ui.ConnectedAt != nil && !ui.ConnectedAt.AsTime().IsZero() {
+			t := ui.ConnectedAt.AsTime()
 			fmt.Fprintf(w, "Connected:\t%s (%s ago)\n", t.UTC().Format(time.RFC3339), fmtAge(t))
 		}
-		if mySource == defaultSource() && ci.Source != "" {
-			mySource = ci.Source
+		if ui.LastSeen != nil && !ui.LastSeen.AsTime().IsZero() {
+			fmt.Fprintf(w, "Last seen:\t%s ago\n", fmtAge(ui.LastSeen.AsTime()))
 		}
-	} else {
-		fmt.Fprintf(w, "Transport:\t%s\n", transport)
 	}
 	fmt.Fprintln(w)
 	_ = w.Flush()

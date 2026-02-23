@@ -113,7 +113,7 @@ message StatusRequest {
 message PeerInfo {
   string source = 1;
   string addr = 2;
-  // role is one of "client", "both" (server with local clipboard).
+  // role is one of "client", "upstream", or "both" (server with local clipboard).
   string role = 3;
   string clipboard = 4;
   repeated string accepted_types = 5;
@@ -123,16 +123,15 @@ message PeerInfo {
 
 message StatusResponse {
   repeated PeerInfo peers = 1;
-  // client_info is populated by the IPC daemon when a CLI tool queries it
-  // over the Unix socket. Absent when querying the server directly via TCP.
-  ClientConnectionInfo client_info = 2;
+  // upstream_info is populated when this server is federated to an upstream.
+  // Absent on standalone servers.
+  UpstreamInfo upstream_info = 2;
 }
 
-// ClientConnectionInfo carries the daemon's upstream connection metadata,
-// allowing CLI tools to display transport/server/connected info without a
-// second TCP connection.
-message ClientConnectionInfo {
-  string server_addr = 1;
+// UpstreamInfo carries federation connection metadata, allowing CLI tools to
+// display upstream server and connection state in status output.
+message UpstreamInfo {
+  string addr = 1;
   string source = 2;
   google.protobuf.Timestamp connected_at = 3;
   google.protobuf.Timestamp last_seen = 4;

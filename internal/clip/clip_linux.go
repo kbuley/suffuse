@@ -22,13 +22,14 @@ type linuxBackend struct {
 	lastImg  []byte
 }
 
-// New returns the Linux clipboard backend. Change detection is via polling.
-// clipboard.Init is called here rather than in init() so that CLI sub-commands
-// (status, copy, paste) that never construct a Backend don't trigger the X11
-// initialisation warning on headless systems.
+// New returns the Linux clipboard backend, or a headless no-op backend if
+// the display environment is unavailable (e.g. a headless server without X11
+// or Wayland). clipboard.Init is called here rather than in init() so that
+// CLI sub-commands (status, copy, paste) don't trigger the warning.
 func New() Backend {
 	if err := clipboard.Init(); err != nil {
-		slog.Warn("clipboard init failed (headless?)", "err", err)
+		slog.Warn("clipboard unavailable, running headless", "err", err)
+		return &headlessBackend{watchCh: make(chan struct{})}
 	}
 	b := &linuxBackend{
 		watchCh: make(chan struct{}, 1),

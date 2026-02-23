@@ -1,12 +1,37 @@
 # suffuse example configuration file
 #
 # Copy to one of the following locations (first found wins):
-#   /etc/suffuse/suffuse.toml        (system-wide)
-#   ~/.config/suffuse/suffuse.toml   (per-user)
-#   path supplied via --config flag
+#
+#   Linux / macOS:
+#     /etc/suffuse/suffuse.toml           system-wide
+#     ~/.config/suffuse/suffuse.toml      per-user (higher precedence)
+#
+#   Windows:
+#     %ProgramData%\suffuse\suffuse.toml  system-wide (used by service)
+#     %APPDATA%\suffuse\suffuse.toml      per-user (higher precedence)
+#
+#   Any platform:
+#     path supplied via --config flag     highest precedence
 #
 # Precedence (lowest → highest):
 #   defaults → this file → SUFFUSE_* env vars → CLI flags
+
+# ── Security ───────────────────────────────────────────────────────────────
+
+# Shared secret. Used for two purposes:
+#   1. TLS key derivation — the same token on both sides produces the same
+#      TLS certificate, so only peers with a matching token can connect.
+#      Different token → TLS handshake fails immediately.
+#   2. Per-RPC bearer token — when set, every gRPC call must carry this value
+#      in the Authorization header.
+#
+# If unset, the default passphrase "suffuse" is used for TLS. Traffic is
+# still encrypted, but any other suffuse instance using the default can connect.
+# Set a custom value to restrict access to known peers.
+#
+# ALL peers on the same network must use the same token value.
+# Env: SUFFUSE_TOKEN
+# token = "changeme"
 
 # ── Server ─────────────────────────────────────────────────────────────────
 
@@ -14,19 +39,12 @@
 # Serves both gRPC and HTTP/JSON (grpc-gateway) on the same port.
 # Default: 0.0.0.0:8752
 # Env:     SUFFUSE_ADDR
-addr = "0.0.0.0:8752"
-
-# Shared secret. If set, all clients must supply the same token.
-# Sent as "Authorization: Bearer <token>" — works identically for gRPC and
-# HTTP/JSON clients (e.g. Neovim plugin).
-# Leave empty to disable auth (fine for trusted LANs).
-# Env: SUFFUSE_TOKEN
-token = ""
+# addr = "0.0.0.0:8752"
 
 # Human-readable name shown in peer lists for this host's local clipboard.
 # Defaults to the system hostname. In containers, automatically derived from
-# CONTAINER_NAME / COMPOSE_SERVICE / SERVICE_NAME env vars, or prefixed from
-# the container ID hash (e.g. "container-546a8399").
+# CONTAINER_NAME / COMPOSE_SERVICE / SERVICE_NAME env vars, or the container
+# ID hash (e.g. "container-546a8399").
 # Env: SUFFUSE_SOURCE
 # source = "macbook"
 
@@ -35,12 +53,30 @@ token = ""
 # Env:     SUFFUSE_NO_LOCAL
 # no-local = false
 
-# ── Client ─────────────────────────────────────────────────────────────────
+# ── Federation ─────────────────────────────────────────────────────────────
 
-# Address of the suffuse server to connect to.
-# Default: localhost:8752
-# Env:     SUFFUSE_SERVER
-server = "localhost:8752"
+# Connect this server to another suffuse server to form a federated cluster.
+# Clipboard events flow between both servers transparently.
+#
+# The upstream token defaults to the local token if not specified separately.
+# The upstream source defaults to the local source.
+#
+# Env: SUFFUSE_UPSTREAM_HOST / SUFFUSE_UPSTREAM_PORT / SUFFUSE_UPSTREAM_TOKEN / SUFFUSE_UPSTREAM_SOURCE
+# upstream-host = "hub.example.com"
+# upstream-port = 8752
+# upstream-token = "changeme"
+# upstream-source = "this-node"
+
+# ── Clients ────────────────────────────────────────────────────────────────
+
+# Host and port of the suffuse server to connect to (used by copy/paste/status
+# CLI tools when no local IPC socket is available).
+# If host is unset, the tools probe host.docker.internal, host.containers.internal,
+# and localhost in order.
+# Default port: 8752
+# Env: SUFFUSE_HOST / SUFFUSE_PORT
+# host = "192.168.1.87"
+# port = 8752
 
 # MIME types this client will accept from the server (server-side filter).
 # Empty means accept all types.
@@ -66,7 +102,6 @@ server = "localhost:8752"
 # log-format = "auto"
 
 # Log level: debug | info | warn | error
-# Defaults to "debug" when running interactively (TTY or --no-background),
-# "info" otherwise.
+# Default: info
 # Env: SUFFUSE_LOG_LEVEL
 # log-level = "info"

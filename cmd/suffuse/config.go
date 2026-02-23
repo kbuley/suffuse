@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -21,9 +22,8 @@ func bindViper(cmd *cobra.Command, v *viper.Viper) error {
 	} else {
 		v.SetConfigName("suffuse")
 		v.SetConfigType("toml")
-		v.AddConfigPath("/etc/suffuse/")
-		if home, err := os.UserHomeDir(); err == nil {
-			v.AddConfigPath(fmt.Sprintf("%s/.config/suffuse", home))
+		for _, p := range configPaths() {
+			v.AddConfigPath(p)
 		}
 	}
 
@@ -40,6 +40,33 @@ func bindViper(cmd *cobra.Command, v *viper.Viper) error {
 		return fmt.Errorf("binding flags: %w", err)
 	}
 	return nil
+}
+
+// configPaths returns the ordered list of directories to search for suffuse.toml.
+// Paths are ordered lowest → highest precedence (viper searches in reverse).
+func configPaths() []string {
+	var paths []string
+
+	if runtime.GOOS == "windows" {
+		// System-wide (ProgramData) — used by the Windows service running as SYSTEM
+		// %ProgramData% is typically C:\ProgramData
+		if pd := os.Getenv("ProgramData"); pd != "" {
+			paths = append(paths, fmt.Sprintf(`%s\suffuse`, pd))
+		}
+		// Per-user roaming profile — used by interactive CLI
+		// %APPDATA% is typically C:\Users\<user>\AppData\Roaming
+		if appdata := os.Getenv("APPDATA"); appdata != "" {
+			paths = append(paths, fmt.Sprintf(`%s\suffuse`, appdata))
+		}
+	} else {
+		// Unix: system-wide first, then per-user (higher precedence)
+		paths = append(paths, "/etc/suffuse")
+		if home, err := os.UserHomeDir(); err == nil {
+			paths = append(paths, fmt.Sprintf("%s/.config/suffuse", home))
+		}
+	}
+
+	return paths
 }
 
 // addLoggingFlags adds the standard logging flags to a command.

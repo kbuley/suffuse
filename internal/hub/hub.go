@@ -27,12 +27,39 @@ type Peer interface {
 	Send(Event)
 }
 
+// BroadcastPeer is an optional interface a Peer may implement to signal that
+// it wants to receive events from all clipboards, not just the one reported
+// in Info().Clipboard. The federation upstream peer implements this.
+type BroadcastPeer interface {
+	Peer
+	Broadcast()
+}
+
+// ClipboardFilter describes what a set of peers needs from a single clipboard.
+// An empty Accepts slice means all MIME types are accepted.
+type ClipboardFilter struct {
+	Clipboard string
+	Accepts   []string
+}
+
+// PeerChangeListener is notified whenever the set of registered peers changes.
+// filters contains one entry per distinct clipboard that has at least one
+// local watcher, with Accepts being the union of accepted types for that
+// clipboard. An empty Accepts on a filter means at least one peer accepts
+// everything on that clipboard.
+type PeerChangeListener interface {
+	OnPeerChange(filters []ClipboardFilter)
+}
+
 // Hub routes clipboard updates between all registered peers.
 type Hub struct {
 	mu           sync.RWMutex
 	peers        map[string]Peer
 	latest       map[string][]*pb.ClipboardItem // clipboard → latest items
 	latestSource map[string]string              // clipboard → source name
+
+	listenerMu sync.RWMutex
+	listener   PeerChangeListener
 }
 
 // New returns an empty Hub.
@@ -42,6 +69,14 @@ func New() *Hub {
 		latest:       make(map[string][]*pb.ClipboardItem),
 		latestSource: make(map[string]string),
 	}
+}
+
+// SetPeerChangeListener registers a listener that is called whenever the peer
+// set changes. Only one listener is supported; calling again replaces it.
+func (h *Hub) SetPeerChangeListener(l PeerChangeListener) {
+	h.listenerMu.Lock()
+	h.listener = l
+	h.listenerMu.Unlock()
 }
 
 // Register adds a peer and immediately delivers the latest clipboard contents
@@ -54,6 +89,7 @@ func (h *Hub) Register(p Peer) {
 	latest := h.latest[cb]
 	src := h.latestSource[cb]
 	total := len(h.peers)
+	filters := h.clipboardFiltersLocked()
 	h.mu.Unlock()
 
 	slog.Info("peer registered",
@@ -62,6 +98,8 @@ func (h *Hub) Register(p Peer) {
 		"clipboard", cb,
 		"total", total,
 	)
+
+	h.notifyListener(filters)
 
 	if len(latest) > 0 {
 		filtered := filterItems(latest, info.AcceptedTypes)
@@ -76,6 +114,7 @@ func (h *Hub) Unregister(p Peer) {
 	h.mu.Lock()
 	delete(h.peers, p.ID())
 	total := len(h.peers)
+	filters := h.clipboardFiltersLocked()
 	h.mu.Unlock()
 
 	slog.Info("peer unregistered",
@@ -83,6 +122,8 @@ func (h *Hub) Unregister(p Peer) {
 		"source", p.Info().Source,
 		"total", total,
 	)
+
+	h.notifyListener(filters)
 }
 
 // Publish stores items as the latest clipboard and fans out to all peers on
@@ -104,7 +145,8 @@ func (h *Hub) Publish(items []*pb.ClipboardItem, clipboardName, originID, source
 			continue
 		}
 		info := p.Info()
-		if canonicalize(info.Clipboard) == cb {
+		_, isBroadcast := p.(BroadcastPeer)
+		if isBroadcast || canonicalize(info.Clipboard) == cb {
 			targets = append(targets, target{p, info.AcceptedTypes})
 		}
 	}
@@ -137,6 +179,69 @@ func (h *Hub) Peers() []*pb.PeerInfo {
 		out = append(out, p.Info())
 	}
 	return out
+}
+
+// clipboardFiltersLocked computes the current set of ClipboardFilters — one
+// per distinct clipboard name across all registered peers. For each clipboard,
+// Accepts is the union of AcceptedTypes across all peers on that clipboard; an
+// empty Accepts means at least one peer accepts everything.
+// Must be called with h.mu held.
+func (h *Hub) clipboardFiltersLocked() []ClipboardFilter {
+	// clipboard → set of accepted MIME types (nil sentinel = accepts all)
+	type entry struct {
+		accepts map[string]struct{}
+		all     bool // true if any peer accepts everything
+	}
+	m := make(map[string]*entry)
+
+	for _, p := range h.peers {
+		// BroadcastPeers span all clipboards and should not influence the
+		// per-clipboard filter calculation — they are the consumers of that
+		// calculation, not inputs to it.
+		if _, isBroadcast := p.(BroadcastPeer); isBroadcast {
+			continue
+		}
+		info := p.Info()
+		cb := canonicalize(info.Clipboard)
+		e, ok := m[cb]
+		if !ok {
+			e = &entry{accepts: make(map[string]struct{})}
+			m[cb] = e
+		}
+		if e.all {
+			continue // already unbounded
+		}
+		if len(info.AcceptedTypes) == 0 {
+			e.all = true
+			e.accepts = nil
+			continue
+		}
+		for _, t := range info.AcceptedTypes {
+			e.accepts[t] = struct{}{}
+		}
+	}
+
+	out := make([]ClipboardFilter, 0, len(m))
+	for cb, e := range m {
+		f := ClipboardFilter{Clipboard: cb}
+		if !e.all {
+			for t := range e.accepts {
+				f.Accepts = append(f.Accepts, t)
+			}
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// notifyListener calls the registered PeerChangeListener if one is set.
+func (h *Hub) notifyListener(filters []ClipboardFilter) {
+	h.listenerMu.RLock()
+	l := h.listener
+	h.listenerMu.RUnlock()
+	if l != nil {
+		l.OnPeerChange(filters)
+	}
 }
 
 // canonicalize returns the effective clipboard name, defaulting to "default".

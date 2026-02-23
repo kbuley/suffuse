@@ -20,16 +20,17 @@ func newCopyCmd() *cobra.Command {
 	v := viper.New()
 
 	cmd := &cobra.Command{
-		Use:     "copy",
-		Short:   "Copy stdin to the suffuse clipboard (like pbcopy)",
-		Long:    `Reads stdin and publishes it to the suffuse clipboard via gRPC.`,
+		Use:   "copy",
+		Short: "Copy stdin to the suffuse clipboard (like pbcopy)",
+		Long:  `Reads stdin and publishes it to the suffuse clipboard via gRPC.`,
 		Args:    cobra.NoArgs,
 		PreRunE: func(cmd *cobra.Command, _ []string) error { return bindViper(cmd, v) },
-		RunE:    func(cmd *cobra.Command, _ []string) error { return runCopy(cmd, v) },
+		RunE:    func(_ *cobra.Command, _ []string) error { return runCopy(v) },
 	}
 
 	f := cmd.Flags()
-	f.String("server", "localhost:8752", "suffuse server address (used when no daemon is running)")
+	f.String("host", "", "suffuse server host (probes docker/podman/localhost if unset)")
+	f.Int("port", 8752, "suffuse server port")
 	f.String("token", "", "shared secret")
 	f.String("mime", "text/plain", "MIME type of the data being copied")
 	f.String("source", defaultSource(), "source identifier")
@@ -39,7 +40,7 @@ func newCopyCmd() *cobra.Command {
 	return cmd
 }
 
-func runCopy(cmd *cobra.Command, v *viper.Viper) error {
+func runCopy(v *viper.Viper) error {
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return fmt.Errorf("read stdin: %w", err)
@@ -48,21 +49,20 @@ func runCopy(cmd *cobra.Command, v *viper.Viper) error {
 		return nil
 	}
 
-	mime := v.GetString("mime")
-	source := v.GetString("source")
+	mime      := v.GetString("mime")
+	source    := v.GetString("source")
 	clipboard := v.GetString("clipboard")
+	token     := v.GetString("token")
+	host      := v.GetString("host")
+	port      := v.GetInt("port")
 
 	var conn *grpc.ClientConn
-	if !cmd.Flags().Changed("server") && ipc.IsRunning() {
+
+	if ipc.IsRunning() {
 		conn, err = dialIPC()
-		if err != nil {
-			conn = nil
-		}
 	}
 	if conn == nil {
-		serverAddr := v.GetString("server")
-		token := v.GetString("token")
-		conn, err = grpc.NewClient(serverAddr, dialOpts(token, source)...)
+		conn, err = dialServer(host, port, token, source)
 		if err != nil {
 			return fmt.Errorf("dial: %w", err)
 		}

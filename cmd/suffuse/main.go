@@ -18,17 +18,24 @@ func main() {
 		Use:   "suffuse",
 		Short: "Shared clipboard over TCP",
 		Long: `suffuse synchronises the system clipboard across machines,
-containers, and SSH sessions over a plain TCP connection.
+containers, and SSH sessions over an encrypted TCP connection (opportunistic
+TLS — self-signed cert, no CA required).
 
-Run "suffuse server" on the host and "suffuse client" on each
-container or remote machine. The server also participates as a
-local clipboard peer by default.`,
+Run "suffuse server" on each host. Use --upstream to federate servers together.
+Use "suffuse copy/paste/status" as CLI tools on any host running a server.
+
+Config file search order (first found wins):
+  /etc/suffuse/suffuse.toml
+  $HOME/.config/suffuse/suffuse.toml
+  path supplied via --config
+
+All flags can be set via SUFFUSE_<FLAG> env vars or config-file keys.
+See "suffuse server --help" for the full flag reference.`,
 		SilenceUsage: true,
 	}
 
 	root.AddCommand(
 		newServerCmd(),
-		newClientCmd(),
 		newCopyCmd(),
 		newPasteCmd(),
 		newStatusCmd(),

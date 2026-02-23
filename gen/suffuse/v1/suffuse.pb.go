@@ -466,7 +466,7 @@ type PeerInfo struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Source string                 `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`
 	Addr   string                 `protobuf:"bytes,2,opt,name=addr,proto3" json:"addr,omitempty"`
-	// role is one of "client", "both" (server with local clipboard).
+	// role is one of "client", "upstream", or "both" (server with local clipboard).
 	Role          string                 `protobuf:"bytes,3,opt,name=role,proto3" json:"role,omitempty"`
 	Clipboard     string                 `protobuf:"bytes,4,opt,name=clipboard,proto3" json:"clipboard,omitempty"`
 	AcceptedTypes []string               `protobuf:"bytes,5,rep,name=accepted_types,json=acceptedTypes,proto3" json:"accepted_types,omitempty"`
@@ -558,9 +558,9 @@ func (x *PeerInfo) GetLastSeen() *timestamppb.Timestamp {
 type StatusResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Peers []*PeerInfo            `protobuf:"bytes,1,rep,name=peers,proto3" json:"peers,omitempty"`
-	// client_info is populated by the IPC daemon when a CLI tool queries it
-	// over the Unix socket. Absent when querying the server directly via TCP.
-	ClientInfo    *ClientConnectionInfo `protobuf:"bytes,2,opt,name=client_info,json=clientInfo,proto3" json:"client_info,omitempty"`
+	// upstream_info is populated when this server is federated to an upstream.
+	// Absent on standalone servers.
+	UpstreamInfo  *UpstreamInfo `protobuf:"bytes,2,opt,name=upstream_info,json=upstreamInfo,proto3" json:"upstream_info,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -602,19 +602,18 @@ func (x *StatusResponse) GetPeers() []*PeerInfo {
 	return nil
 }
 
-func (x *StatusResponse) GetClientInfo() *ClientConnectionInfo {
+func (x *StatusResponse) GetUpstreamInfo() *UpstreamInfo {
 	if x != nil {
-		return x.ClientInfo
+		return x.UpstreamInfo
 	}
 	return nil
 }
 
-// ClientConnectionInfo carries the daemon's upstream connection metadata,
-// allowing CLI tools to display transport/server/connected info without a
-// second TCP connection.
-type ClientConnectionInfo struct {
+// UpstreamInfo carries federation connection metadata, allowing CLI tools to
+// display upstream server and connection state in status output.
+type UpstreamInfo struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	ServerAddr    string                 `protobuf:"bytes,1,opt,name=server_addr,json=serverAddr,proto3" json:"server_addr,omitempty"`
+	Addr          string                 `protobuf:"bytes,1,opt,name=addr,proto3" json:"addr,omitempty"`
 	Source        string                 `protobuf:"bytes,2,opt,name=source,proto3" json:"source,omitempty"`
 	ConnectedAt   *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=connected_at,json=connectedAt,proto3" json:"connected_at,omitempty"`
 	LastSeen      *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=last_seen,json=lastSeen,proto3" json:"last_seen,omitempty"`
@@ -622,20 +621,20 @@ type ClientConnectionInfo struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ClientConnectionInfo) Reset() {
-	*x = ClientConnectionInfo{}
+func (x *UpstreamInfo) Reset() {
+	*x = UpstreamInfo{}
 	mi := &file_suffuse_v1_suffuse_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ClientConnectionInfo) String() string {
+func (x *UpstreamInfo) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ClientConnectionInfo) ProtoMessage() {}
+func (*UpstreamInfo) ProtoMessage() {}
 
-func (x *ClientConnectionInfo) ProtoReflect() protoreflect.Message {
+func (x *UpstreamInfo) ProtoReflect() protoreflect.Message {
 	mi := &file_suffuse_v1_suffuse_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -647,33 +646,33 @@ func (x *ClientConnectionInfo) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ClientConnectionInfo.ProtoReflect.Descriptor instead.
-func (*ClientConnectionInfo) Descriptor() ([]byte, []int) {
+// Deprecated: Use UpstreamInfo.ProtoReflect.Descriptor instead.
+func (*UpstreamInfo) Descriptor() ([]byte, []int) {
 	return file_suffuse_v1_suffuse_proto_rawDescGZIP(), []int{10}
 }
 
-func (x *ClientConnectionInfo) GetServerAddr() string {
+func (x *UpstreamInfo) GetAddr() string {
 	if x != nil {
-		return x.ServerAddr
+		return x.Addr
 	}
 	return ""
 }
 
-func (x *ClientConnectionInfo) GetSource() string {
+func (x *UpstreamInfo) GetSource() string {
 	if x != nil {
 		return x.Source
 	}
 	return ""
 }
 
-func (x *ClientConnectionInfo) GetConnectedAt() *timestamppb.Timestamp {
+func (x *UpstreamInfo) GetConnectedAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.ConnectedAt
 	}
 	return nil
 }
 
-func (x *ClientConnectionInfo) GetLastSeen() *timestamppb.Timestamp {
+func (x *UpstreamInfo) GetLastSeen() *timestamppb.Timestamp {
 	if x != nil {
 		return x.LastSeen
 	}
@@ -718,14 +717,12 @@ const file_suffuse_v1_suffuse_proto_rawDesc = "" +
 	"\tclipboard\x18\x04 \x01(\tR\tclipboard\x12%\n" +
 	"\x0eaccepted_types\x18\x05 \x03(\tR\racceptedTypes\x12=\n" +
 	"\fconnected_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\vconnectedAt\x127\n" +
-	"\tlast_seen\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\blastSeen\"\x7f\n" +
+	"\tlast_seen\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\blastSeen\"{\n" +
 	"\x0eStatusResponse\x12*\n" +
-	"\x05peers\x18\x01 \x03(\v2\x14.suffuse.v1.PeerInfoR\x05peers\x12A\n" +
-	"\vclient_info\x18\x02 \x01(\v2 .suffuse.v1.ClientConnectionInfoR\n" +
-	"clientInfo\"\xc7\x01\n" +
-	"\x14ClientConnectionInfo\x12\x1f\n" +
-	"\vserver_addr\x18\x01 \x01(\tR\n" +
-	"serverAddr\x12\x16\n" +
+	"\x05peers\x18\x01 \x03(\v2\x14.suffuse.v1.PeerInfoR\x05peers\x12=\n" +
+	"\rupstream_info\x18\x02 \x01(\v2\x18.suffuse.v1.UpstreamInfoR\fupstreamInfo\"\xb2\x01\n" +
+	"\fUpstreamInfo\x12\x12\n" +
+	"\x04addr\x18\x01 \x01(\tR\x04addr\x12\x16\n" +
 	"\x06source\x18\x02 \x01(\tR\x06source\x12=\n" +
 	"\fconnected_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\vconnectedAt\x127\n" +
 	"\tlast_seen\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\blastSeen2\xde\x02\n" +
@@ -760,7 +757,7 @@ var file_suffuse_v1_suffuse_proto_goTypes = []any{
 	(*StatusRequest)(nil),         // 7: suffuse.v1.StatusRequest
 	(*PeerInfo)(nil),              // 8: suffuse.v1.PeerInfo
 	(*StatusResponse)(nil),        // 9: suffuse.v1.StatusResponse
-	(*ClientConnectionInfo)(nil),  // 10: suffuse.v1.ClientConnectionInfo
+	(*UpstreamInfo)(nil),          // 10: suffuse.v1.UpstreamInfo
 	(*timestamppb.Timestamp)(nil), // 11: google.protobuf.Timestamp
 }
 var file_suffuse_v1_suffuse_proto_depIdxs = []int32{
@@ -770,9 +767,9 @@ var file_suffuse_v1_suffuse_proto_depIdxs = []int32{
 	11, // 3: suffuse.v1.PeerInfo.connected_at:type_name -> google.protobuf.Timestamp
 	11, // 4: suffuse.v1.PeerInfo.last_seen:type_name -> google.protobuf.Timestamp
 	8,  // 5: suffuse.v1.StatusResponse.peers:type_name -> suffuse.v1.PeerInfo
-	10, // 6: suffuse.v1.StatusResponse.client_info:type_name -> suffuse.v1.ClientConnectionInfo
-	11, // 7: suffuse.v1.ClientConnectionInfo.connected_at:type_name -> google.protobuf.Timestamp
-	11, // 8: suffuse.v1.ClientConnectionInfo.last_seen:type_name -> google.protobuf.Timestamp
+	10, // 6: suffuse.v1.StatusResponse.upstream_info:type_name -> suffuse.v1.UpstreamInfo
+	11, // 7: suffuse.v1.UpstreamInfo.connected_at:type_name -> google.protobuf.Timestamp
+	11, // 8: suffuse.v1.UpstreamInfo.last_seen:type_name -> google.protobuf.Timestamp
 	1,  // 9: suffuse.v1.ClipboardService.Copy:input_type -> suffuse.v1.CopyRequest
 	3,  // 10: suffuse.v1.ClipboardService.Paste:input_type -> suffuse.v1.PasteRequest
 	5,  // 11: suffuse.v1.ClipboardService.Watch:input_type -> suffuse.v1.WatchRequest

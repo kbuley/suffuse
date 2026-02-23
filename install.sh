@@ -173,7 +173,7 @@ download_binary() {
 
     info "Verifying checksum"
     local expected actual
-    expected="$(grep " ${filename}$\| ${filename} " "${tmp}/checksums.txt" | awk '{print $1}')"
+    expected="$(grep "${filename}" "${tmp}/checksums.txt" | awk '{print $1}')"
     [ -n "$expected" ] || die "Checksum not found for ${filename} in checksums.txt"
 
     if command -v sha256sum >/dev/null 2>&1; then

@@ -92,7 +92,7 @@ func dialServerResolved(host string, port int, token, source string) (*grpc.Clie
 	}
 	creds, err := tlsconf.ClientCredentials(passphrase)
 	if err != nil {
-		return nil, fmt.Errorf("tls credentials: %w", err)
+		return nil, "", fmt.Errorf("tls credentials: %w", err)
 	}
 	opts := []grpc.DialOption{grpc.WithTransportCredentials(creds)}
 	if token != "" || source != "" {

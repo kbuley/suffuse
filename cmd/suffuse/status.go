@@ -67,9 +67,10 @@ func runStatus(cmd *cobra.Command, v *viper.Viper) error {
 	jsonOut := v.GetBool("json")
 
 	var (
-		conn      *grpc.ClientConn
-		transport string
-		err       error
+		conn       *grpc.ClientConn
+		transport  string
+		remoteAddr string // non-empty when querying a remote server over TCP
+		err        error
 	)
 
 	if !cmd.Flags().Changed("host") && ipc.IsRunning() {
@@ -82,10 +83,12 @@ func runStatus(cmd *cobra.Command, v *viper.Viper) error {
 	}
 
 	if conn == nil {
-		conn, err = dialServer(host, port, token, source)
+		var resolvedHost string
+		conn, resolvedHost, err = dialServerResolved(host, port, token, source)
 		if err != nil {
 			return fmt.Errorf("dial: %w", err)
 		}
+		remoteAddr = fmt.Sprintf("%s:%d", resolvedHost, port)
 		if host != "" {
 			transport = fmt.Sprintf("tcp (%s:%d)", host, port)
 		} else {
@@ -106,11 +109,11 @@ func runStatus(cmd *cobra.Command, v *viper.Viper) error {
 		return nil
 	}
 
-	printStatus(resp, source, transport)
+	printStatus(resp, source, transport, remoteAddr)
 	return nil
 }
 
-func printStatus(resp *pb.StatusResponse, mySource, transport string) {
+func printStatus(resp *pb.StatusResponse, mySource, transport string, remoteAddr string) {
 	w := tabwriter.NewWriter(os.Stdout, 1, 0, 2, ' ', 0)
 
 	fmt.Fprintf(w, "Transport:\t%s\n", transport)
@@ -118,10 +121,10 @@ func printStatus(resp *pb.StatusResponse, mySource, transport string) {
 		fmt.Fprintf(w, "Upstream:\t%s\n", ui.Addr)
 		if ui.ConnectedAt != nil && !ui.ConnectedAt.AsTime().IsZero() {
 			t := ui.ConnectedAt.AsTime()
-			fmt.Fprintf(w, "Connected:\t%s (%s ago)\n", t.UTC().Format(time.RFC3339), fmtAge(t))
+			fmt.Fprintf(w, "Connected:\t%s (%s)\n", t.UTC().Format(time.RFC3339), fmtAge(t))
 		}
 		if ui.LastSeen != nil && !ui.LastSeen.AsTime().IsZero() {
-			fmt.Fprintf(w, "Last seen:\t%s ago\n", fmtAge(ui.LastSeen.AsTime()))
+			fmt.Fprintf(w, "Last seen:\t%s\n", fmtAge(ui.LastSeen.AsTime()))
 		}
 	}
 	fmt.Fprintln(w)
@@ -140,12 +143,21 @@ func printStatus(resp *pb.StatusResponse, mySource, transport string) {
 		if len(p.AcceptedTypes) > 0 {
 			accepts = strings.Join(p.AcceptedTypes, ",")
 		}
+		// Mark the row that represents this client.
+		// For upstream rows (role=="upstream"), never mark as self.
 		marker := ""
-		if p.Source == mySource {
+		if p.Source == mySource && p.Role != "upstream" {
 			marker = "*"
 		}
+		// The server records the local peer's addr as "local".
+		// When we are querying remotely over TCP, replace "local" with
+		// the address we actually connected to so the client sees something useful.
+		addr := p.Addr
+		if addr == "local" && remoteAddr != "" {
+			addr = remoteAddr
+		}
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			marker, p.Source, p.Addr, p.Role, p.Clipboard,
+			marker, p.Source, addr, p.Role, p.Clipboard,
 			tsAge(p.ConnectedAt), tsAge(p.LastSeen), accepts,
 		)
 	}
@@ -163,6 +175,9 @@ func tsAge(ts *timestamppb.Timestamp) string {
 	return fmtAge(t)
 }
 
+// fmtAge returns a human-readable age string like "5s ago", "2m ago", or a
+// clock time for ages over an hour. All callers are responsible for any
+// surrounding context (e.g. parentheses); this function never double-appends "ago".
 func fmtAge(t time.Time) string {
 	age := time.Since(t).Round(time.Second)
 	if age < time.Minute {

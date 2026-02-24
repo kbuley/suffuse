@@ -73,6 +73,12 @@ func dialIPC() (*grpc.ClientConn, error) {
 // If host is non-empty only that host is tried. Port defaults to 8752.
 // token is used for both TLS key derivation and per-RPC auth.
 func dialServer(host string, port int, token, source string) (*grpc.ClientConn, error) {
+	conn, _, err := dialServerResolved(host, port, token, source)
+	return conn, err
+}
+
+// dialServerResolved is like dialServer but also returns the resolved host name.
+func dialServerResolved(host string, port int, token, source string) (*grpc.ClientConn, string, error) {
 	if port == 0 {
 		port = 8752
 	}
@@ -106,12 +112,12 @@ func dialServer(host string, port int, token, source string) (*grpc.ClientConn, 
 		_, err = client.Status(ctx, &pb.StatusRequest{})
 		cancel()
 		if err == nil {
-			return conn, nil
+			return conn, h, nil
 		}
 		_ = conn.Close()
 		lastErr = fmt.Errorf("%s: %w", addr, err)
 	}
-	return nil, fmt.Errorf("no reachable suffuse server: %w", lastErr)
+	return nil, "", fmt.Errorf("no reachable suffuse server: %w", lastErr)
 }
 
 // dialOpts returns gRPC dial options for the local IPC socket (insecure).

@@ -66,6 +66,23 @@ SUFFUSE_BIN_DIR=~/.local/bin curl -fsSL .../install.sh | sh
 SUFFUSE_NO_SERVICE=1 curl -fsSL .../install.sh | sh
 ```
 
+### Upgrade
+
+Re-run the install command. If a service is already registered it will be
+reloaded automatically with the new binary — no need to reinstall the service.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kbuley/suffuse/main/install.sh | sh
+```
+
+### Uninstall
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kbuley/suffuse/main/install.sh | sh -s -- uninstall
+```
+
+This stops and removes the service and binary. Config files are left in place.
+
 ### Windows
 
 Download `suffuse-windows.exe` from the [latest release], rename it to

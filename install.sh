@@ -1,8 +1,13 @@
 #!/usr/bin/env sh
-# install.sh — download and install suffuse
+# install.sh — install, upgrade, or uninstall suffuse
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/kbuley/suffuse/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/kbuley/suffuse/main/install.sh | sh -s -- uninstall
+#
+# Commands:
+#   install    (default) install or upgrade suffuse
+#   uninstall  remove binary and service
 #
 # Non-interactive env overrides:
 #   SUFFUSE_VERSION    specific version, e.g. v0.2.0 (default: latest)
@@ -73,21 +78,21 @@ choose_linux_scope() {
         echo "user"; return
     fi
 
-    printf '\n'
+    printf '\n' >&2
     info "How should suffuse be installed?"
-    printf '\n'
-    printf '  [1] Per-user   (recommended for most cases)\n'
-    printf '        Binary:   ~/.local/bin/suffuse\n'
-    printf '        Service:  systemd user unit — isolated to your login session\n'
-    printf '        Sudo:     not required\n'
-    printf '\n'
-    printf '  [2] System-wide\n'
-    printf '        Binary:   /usr/local/bin/suffuse\n'
-    printf '        Service:  systemd system unit — shared across all users\n'
-    printf '        Sudo:     required\n'
-    printf '        Note:     appropriate for a relay/hub or single-user machine.\n'
-    printf '                  On multi-user servers all SSH sessions share one clipboard.\n'
-    printf '\n'
+    printf '\n' >&2
+    printf '  [1] Per-user   (recommended for most cases)\n' >&2
+    printf '        Binary:   ~/.local/bin/suffuse\n' >&2
+    printf '        Service:  systemd user unit — isolated to your login session\n' >&2
+    printf '        Sudo:     not required\n' >&2
+    printf '\n' >&2
+    printf '  [2] System-wide\n' >&2
+    printf '        Binary:   /usr/local/bin/suffuse\n' >&2
+    printf '        Service:  systemd system unit — shared across all users\n' >&2
+    printf '        Sudo:     required\n' >&2
+    printf '        Note:     appropriate for a relay/hub or single-user machine.\n' >&2
+    printf '                  On multi-user servers all SSH sessions share one clipboard.\n' >&2
+    printf '\n' >&2
 
     while true; do
         ask "Choice [1/2] (default: 1):"
@@ -110,12 +115,12 @@ ask_no_local() {
 
     ! is_interactive && { echo "no"; return; }
 
-    printf '\n'
+    printf '\n' >&2
     info "Does this machine have a local display and clipboard?"
-    printf '\n'
-    printf '  [1] Yes — sync this machine'"'"'s clipboard with connected peers\n'
-    printf '  [2] No  — headless relay only (--no-local), just route clipboard events\n'
-    printf '\n'
+    printf '\n' >&2
+    printf '  [1] Yes — sync this machine'"'"'s clipboard with connected peers\n' >&2
+    printf '  [2] No  — headless relay only (--no-local), just route clipboard events\n' >&2
+    printf '\n' >&2
 
     while true; do
         ask "Choice [1/2] (default: 1):"
@@ -147,7 +152,7 @@ resolve_version() {
         | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/'
 }
 
-# ── Download + verify + extract ───────────────────────────────────────────────
+# ── Download + verify ─────────────────────────────────────────────────────────
 
 download_binary() {
     local version="$1" os="$2" arch="$3"
@@ -165,7 +170,6 @@ download_binary() {
 
     info "Verifying checksum"
     local expected actual
-    # checksums.txt format: "<hash>  <filename>" (two spaces)
     expected="$(awk -v f="${filename}" '$2 == f {print $1}' "${tmp}/checksums.txt")"
     [ -n "$expected" ] || die "Checksum not found for ${filename} in checksums.txt"
 
@@ -210,7 +214,7 @@ install_binary() {
     esac
 }
 
-# ── Service: macOS ────────────────────────────────────────────────────────────
+# ── Service install: macOS ────────────────────────────────────────────────────
 
 install_service_darwin() {
     local bin_dst="$1"
@@ -238,13 +242,13 @@ install_service_darwin() {
     launchctl load "$plist_dst"
     rm -f "$plist_src"
     ok "launchd agent installed and loaded"
-    printf '\n  Stop:    launchctl unload ~/Library/LaunchAgents/%s.plist\n' "$label"
-    printf '  Start:   launchctl load  ~/Library/LaunchAgents/%s.plist\n' "$label"
-    printf '  Logs:    tail -f /tmp/suffuse.log\n'
-    printf '  Config:  ~/.config/suffuse/suffuse.toml\n\n'
+    printf '\n  Stop:    launchctl unload ~/Library/LaunchAgents/%s.plist\n' "$label" >&2
+    printf '  Start:   launchctl load  ~/Library/LaunchAgents/%s.plist\n' "$label" >&2
+    printf '  Logs:    tail -f /tmp/suffuse.log\n' >&2
+    printf '  Config:  ~/.config/suffuse/suffuse.toml\n\n' >&2
 }
 
-# ── Service: Linux system ─────────────────────────────────────────────────────
+# ── Service install: Linux system ─────────────────────────────────────────────
 
 install_service_linux_system() {
     local bin_dst="$1" no_local="$2"
@@ -266,13 +270,13 @@ install_service_linux_system() {
     sudo systemctl enable suffuse.service
     rm -f "$svc"
     ok "systemd system service installed and enabled"
-    printf '\n  Start:   sudo systemctl start suffuse\n'
-    printf '  Status:  sudo systemctl status suffuse\n'
-    printf '  Logs:    journalctl -u suffuse -f\n'
-    printf '  Config:  /etc/suffuse/suffuse.toml\n\n'
+    printf '\n  Start:   sudo systemctl start suffuse\n' >&2
+    printf '  Status:  sudo systemctl status suffuse\n' >&2
+    printf '  Logs:    journalctl -u suffuse -f\n' >&2
+    printf '  Config:  /etc/suffuse/suffuse.toml\n\n' >&2
 }
 
-# ── Service: Linux user ───────────────────────────────────────────────────────
+# ── Service install: Linux user ───────────────────────────────────────────────
 
 install_service_linux_user() {
     local bin_dst="$1"
@@ -313,17 +317,94 @@ install_service_linux_user() {
     systemctl --user enable suffuse.service
     rm -f "$svc"
     ok "systemd user service installed and enabled"
-    printf '\n  Start:   systemctl --user start suffuse\n'
-    printf '  Status:  systemctl --user status suffuse\n'
-    printf '  Logs:    journalctl --user -u suffuse -f\n'
-    printf '  Config:  ~/.config/suffuse/suffuse.toml\n\n'
+    printf '\n  Start:   systemctl --user start suffuse\n' >&2
+    printf '  Status:  systemctl --user status suffuse\n' >&2
+    printf '  Logs:    journalctl --user -u suffuse -f\n' >&2
+    printf '  Config:  ~/.config/suffuse/suffuse.toml\n\n' >&2
 }
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Uninstall ─────────────────────────────────────────────────────────────────
 
-main() {
+uninstall_darwin() {
+    local label="dev.klb.suffuse"
+    local plist="${HOME}/Library/LaunchAgents/${label}.plist"
+
+    if launchctl list "$label" >/dev/null 2>&1; then
+        info "Stopping and unloading launchd agent"
+        launchctl unload "$plist" 2>/dev/null || true
+        ok "launchd agent unloaded"
+    fi
+    if [ -f "$plist" ]; then
+        rm -f "$plist"
+        ok "Removed ${plist}"
+    fi
+}
+
+uninstall_linux() {
+    # Try user unit first, then system
+    if systemctl --user is-enabled suffuse 2>/dev/null | grep -q enabled; then
+        info "Stopping and disabling systemd user service"
+        systemctl --user stop    suffuse 2>/dev/null || true
+        systemctl --user disable suffuse 2>/dev/null || true
+        systemctl --user daemon-reload
+        ok "systemd user service removed"
+    fi
+    local user_unit="${HOME}/.config/systemd/user/suffuse.service"
+    if [ -f "$user_unit" ]; then
+        rm -f "$user_unit"
+        ok "Removed ${user_unit}"
+    fi
+
+    if systemctl is-enabled suffuse 2>/dev/null | grep -q enabled; then
+        info "Stopping and disabling systemd system service"
+        sudo systemctl stop    suffuse 2>/dev/null || true
+        sudo systemctl disable suffuse 2>/dev/null || true
+        sudo systemctl daemon-reload
+        ok "systemd system service removed"
+    fi
+    local system_unit="/etc/systemd/system/suffuse.service"
+    if [ -f "$system_unit" ]; then
+        sudo rm -f "$system_unit"
+        ok "Removed ${system_unit}"
+    fi
+}
+
+uninstall() {
+    local os
+    os="$(detect_os)"
+
+    info "Uninstalling suffuse"
+
+    case "$os" in
+        darwin) uninstall_darwin ;;
+        linux)  uninstall_linux  ;;
+    esac
+
+    # Remove binary from all candidate locations
+    for dir in "${SUFFUSE_BIN_DIR:-}" "${HOME}/.local/bin" /usr/local/bin; do
+        [ -z "$dir" ] && continue
+        local bin="${dir}/${BIN_NAME}"
+        if [ -f "$bin" ]; then
+            info "Removing ${bin}"
+            if [ -w "$dir" ]; then
+                rm -f "$bin"
+            else
+                sudo rm -f "$bin"
+            fi
+            ok "Removed ${bin}"
+        fi
+    done
+
+    ok "suffuse uninstalled"
+    warn "Config files were not removed:"
+    warn "  ~/.config/suffuse/suffuse.toml"
+    warn "  /etc/suffuse/suffuse.toml  (if present)"
+}
+
+# ── Install / upgrade ─────────────────────────────────────────────────────────
+
+install() {
     need curl
-    need tar
 
     local os arch version tmp_bin bin_dir bin_dst
     local scope="user" use_sudo="no" no_local="no"
@@ -332,7 +413,7 @@ main() {
     arch="$(detect_arch)"
     version="$(resolve_version)"
 
-    printf '\n'
+    printf '\n' >&2
     info "suffuse ${version} — ${os}/${arch}"
 
     case "$os" in
@@ -340,8 +421,6 @@ main() {
             scope="$(choose_linux_scope)"
             [ "$scope" = "system" ] && use_sudo="yes"
             [ "$scope" = "system" ] && no_local="$(ask_no_local)"
-            ;;
-        darwin)
             ;;
     esac
 
@@ -357,13 +436,54 @@ main() {
         return
     fi
 
-    case "${os}:${scope}" in
-        darwin:*)     install_service_darwin        "$bin_dst" ;;
-        linux:system) install_service_linux_system  "$bin_dst" "$no_local" ;;
-        linux:user)   install_service_linux_user    "$bin_dst" ;;
+    # If a service already exists, reload it rather than re-registering
+    case "$os" in
+        darwin)
+            local label="dev.klb.suffuse"
+            local plist="${HOME}/Library/LaunchAgents/${label}.plist"
+            if [ -f "$plist" ]; then
+                info "Reloading launchd agent"
+                launchctl unload "$plist" 2>/dev/null || true
+                launchctl load   "$plist"
+                ok "launchd agent reloaded with new binary"
+            else
+                install_service_darwin "$bin_dst"
+            fi
+            ;;
+        linux)
+            local reloaded="no"
+            if systemctl --user is-enabled suffuse 2>/dev/null | grep -q enabled; then
+                info "Restarting systemd user service"
+                systemctl --user restart suffuse
+                ok "systemd user service restarted"
+                reloaded="yes"
+            elif systemctl is-enabled suffuse 2>/dev/null | grep -q enabled; then
+                info "Restarting systemd system service"
+                sudo systemctl restart suffuse
+                ok "systemd system service restarted"
+                reloaded="yes"
+            fi
+            if [ "$reloaded" = "no" ]; then
+                case "$scope" in
+                    system) install_service_linux_system "$bin_dst" "$no_local" ;;
+                    user)   install_service_linux_user   "$bin_dst" ;;
+                esac
+            fi
+            ;;
     esac
 
     ok "suffuse ${version} installed successfully"
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+main() {
+    local cmd="${1:-install}"
+    case "$cmd" in
+        install|upgrade) install ;;
+        uninstall)       uninstall ;;
+        *) die "Unknown command: ${cmd}. Use 'install' or 'uninstall'" ;;
+    esac
 }
 
 main "$@"
